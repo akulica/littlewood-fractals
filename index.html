@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <title>Littlewood fractals (WebGPU)</title>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="handles"></div>
+    <form id="panel" onsubmit="return false">
+      <label>Degree <input id="degree" type="number" min="1" max="32" value="20" /></label>
+      <label>Coefficients <input id="coeffs" type="text" value="1, -1" spellcheck="false" /></label>
+      <label>Colour
+        <select id="color">
+          <option value="1">hue by low-order coefficients</option>
+          <option value="0">density (inferno)</option>
+        </select>
+      </label>
+      <label>Exposure <input id="exposure" type="range" min="0.2" max="3" step="0.05" value="1" /></label>
+      <label>Gamma <input id="gamma" type="range" min="0.2" max="1.5" step="0.05" value="0.6" /></label>
+      <div class="row">
+        <button id="zoomIn" type="button">Zoom +</button>
+        <button id="zoomOut" type="button">Zoom −</button>
+        <button id="reset" type="button">Reset view</button>
+      </div>
+      <output id="status"></output>
+    </form>
+    <div id="error" hidden></div>
+    <script type="module" src="/src/ui/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #ddd; font: 13px system-ui, sans-serif; }
+#view { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; cursor: grab; }
+#handles { position: fixed; inset: 0; pointer-events: none; }
+.handle { position: absolute; width: 18px; height: 18px; margin: -11px 0 0 -11px; border: 2px solid #fff; border-radius: 50%;
+          pointer-events: auto; cursor: move; touch-action: none; box-shadow: 0 0 4px #000; }
+#panel { position: fixed; top: 8px; left: 8px; display: grid; gap: 6px; padding: 10px; max-width: 290px;
+         background: rgba(10, 10, 20, 0.8); border-radius: 8px; }
+#panel label { display: grid; grid-template-columns: 90px 1fr; align-items: center; gap: 6px; }
+#panel .row { display: flex; gap: 6px; }
+#coeffs.invalid { outline: 2px solid #e44; }
+#status { white-space: pre-line; font-variant-numeric: tabular-nums; }
+#error { position: fixed; inset: 30% 10% auto; padding: 16px; background: #400; color: #fff; border-radius: 8px; }
