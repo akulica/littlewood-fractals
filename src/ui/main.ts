@@ -1,10 +1,10 @@
 import './style.css';
 import { formatComplex, parseCoefficientList, type Complex } from '../core/complex';
 import { leadingFixable } from '../core/enumeration';
-import { nextBudget, previewDegree } from '../core/schedule';
+import { nextBudget, previewDegree, type Kernel } from '../core/schedule';
 import { fitView, panBy, pixelToWorld, worldToPixel, zoomAt, type View } from '../core/view';
 import { getDevice } from '../gpu/device';
-import { Engine, MAX_COEFFS, MAX_DEGREE, type DisplayParams } from '../gpu/engine';
+import { Engine, MAX_COEFFS, MAX_DEGREE, type Calibration, type DisplayParams } from '../gpu/engine';
 
 const TARGET_MS = 12; // GPU time per frame while interacting; leaves headroom for 60 Hz
 const IDLE_TARGET_MS = 40; // GPU time per back-to-back chunk while refining (well under the ~2 s Windows TDR)
@@ -16,6 +16,7 @@ const handles = el<HTMLDivElement>('handles');
 const degreeInput = el<HTMLInputElement>('degree');
 const coeffInput = el<HTMLInputElement>('coeffs');
 const colorSelect = el<HTMLSelectElement>('color');
+const kernelSelect = el<HTMLSelectElement>('kernel');
 const exposureInput = el<HTMLInputElement>('exposure');
 const gammaInput = el<HTMLInputElement>('gamma');
 const statusOut = el<HTMLOutputElement>('status');
@@ -194,13 +195,19 @@ async function start(): Promise<void> {
     }
   });
   for (const input of [colorSelect, exposureInput, gammaInput]) input.addEventListener('input', () => (displayDirty = true));
+  kernelSelect.addEventListener('change', () => {
+    engine.kernel = kernelSelect.value === 'auto' ? calibration.kernel : (kernelSelect.value as Kernel);
+    restart();
+  });
 
   function updateStatus(): void {
     const { done, total } = engine.progress;
     const pct = total > 0n ? Number((done * 10000n) / total) / 100 : 100;
     const secondsLeft = (Number(total - done) * engine.degree) / Math.max(rootsPerSec, 1);
+    const kernelNote = kernelSelect.value === 'auto' ? ` (auto: coop/perPoly = ${(calibration.coopMs / calibration.perPolyMs).toFixed(2)})` : '';
     statusOut.textContent =
       `degree ${engine.degree}${engine.degree < degree ? ' (preview)' : ''} · ${coeffs.length} coefficients\n` +
+      `kernel ${engine.kernel}${kernelNote}\n` +
       `${pct.toFixed(2)} % of ${total.toLocaleString()} polynomials\n` +
       `${(rootsPerSec / 1e6).toFixed(1)} M roots/s` +
       (done < total ? ` · ~${fmtTime(secondsLeft)} left` : ' · done');
@@ -257,6 +264,13 @@ async function start(): Promise<void> {
     });
   }
 
+  // Pick the faster splat kernel for this GPU before the first frame (~0.1-0.5 s; the canvas stays black meanwhile).
+  sizeCanvas();
+  statusOut.textContent = 'measuring kernels on this GPU…';
+  kernelSelect.disabled = true; // its listener reads `calibration`, which does not exist until this resolves
+  const calibration: Calibration = await engine.calibrate();
+  kernelSelect.disabled = false;
+  restart();
   new ResizeObserver(() => sizeCanvas()).observe(canvas);
   requestAnimationFrame(frame);
 }

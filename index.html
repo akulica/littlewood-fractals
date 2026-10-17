@@ -17,6 +17,13 @@
           <option value="0">density (inferno)</option>
         </select>
       </label>
+      <label>Kernel
+        <select id="kernel">
+          <option value="auto">auto (fastest on this GPU)</option>
+          <option value="perPoly">thread per polynomial</option>
+          <option value="coop">cooperative (thread per root)</option>
+        </select>
+      </label>
       <label>Exposure <input id="exposure" type="range" min="0.2" max="3" step="0.05" value="1" /></label>
       <label>Gamma <input id="gamma" type="range" min="0.2" max="1.5" step="0.05" value="0.6" /></label>
       <div class="row">
