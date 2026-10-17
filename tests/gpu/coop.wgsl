@@ -1,0 +1,148 @@
+// coop.wgsl — BENCHMARK-ONLY variant: one workgroup thread per ROOT (Jacobi Aberth, shared memory).
+// Same Params/bindings as src/gpu/roots.wgsl. Measured 10-40% slower on Intel Arc 140T; re-measure on RDNA 4.
+const WG: u32 = 64u;
+
+struct Params {
+  degree: u32,      // d: highest term index (polynomial has d+1 coefficient slots)
+  numCoeffs: u32,   // k: size of the coefficient set
+  count: u32,       // polynomials in this dispatch
+  strideX: u32,     // invocations per dispatch row = workgroupsX * WG
+  width: u32,       // histogram width in pixels
+  height: u32,      // histogram height in pixels
+  maxIter: u32,     // Aberth sweeps cap
+  _pad0: u32,
+  center: vec2f,    // complex value at the canvas centre
+  pxPerUnit: f32,   // pixels per unit of the complex plane
+  tol: f32,
+};
+
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;      // k coefficient values
+@group(0) @binding(2) var<storage, read> baseDigits: array<u32>;    // d+1 base-k digits of this dispatch's first index; digit i picks a_i
+@group(0) @binding(3) var<storage, read_write> hist: array<atomic<u32>>;  // 4 u32 per pixel: count, r, g, b
+@group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>; // [0] = unconverged polynomials
+
+
+fn cmul(p: vec2f, q: vec2f) -> vec2f { return vec2f(p.x * q.x - p.y * q.y, p.x * q.y + p.y * q.x); }
+fn cdiv(p: vec2f, q: vec2f) -> vec2f {
+  let d = max(dot(q, q), 1e-30);
+  return vec2f(p.x * q.x + p.y * q.y, p.y * q.x - p.x * q.y) / d;
+}
+fn crecip(q: vec2f) -> vec2f { let d = max(dot(q, q), 1e-30); return vec2f(q.x, -q.y) / d; }
+// Integer test for inf/NaN: WGSL compilers may assume floats are finite, so float compares cannot be trusted.
+fn finite2(v: vec2f) -> bool {
+  let e = bitcast<vec2u>(v) & vec2u(0x7f800000u);
+  return all(e != vec2u(0x7f800000u));
+}
+
+
+fn hue2rgb(h: f32) -> vec3f {
+  return clamp(abs(fract(h + vec3f(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, vec3f(0.0), vec3f(1.0));
+}
+fn deposit(r: vec2f, rgb: vec3u) {
+  let ix = i32(floor((r.x - P.center.x) * P.pxPerUnit + f32(P.width) * 0.5));
+  let iy = i32(floor(f32(P.height) * 0.5 - (r.y - P.center.y) * P.pxPerUnit));
+  if (ix < 0 || iy < 0 || ix >= i32(P.width) || iy >= i32(P.height)) { return; }
+  let idx = (u32(iy) * P.width + u32(ix)) * 4u;
+  atomicAdd(&hist[idx], 1u);
+  atomicAdd(&hist[idx + 1u], rgb.x);
+  atomicAdd(&hist[idx + 2u], rgb.y);
+  atomicAdd(&hist[idx + 3u], rgb.z);
+}
+
+const WGS: u32 = 256u;
+var<workgroup> sa: array<vec2f, 512>;    // coefficients of the polys in this workgroup, (d+1) per poly
+var<workgroup> sz: array<vec2f, 256>;    // current root estimates, d per poly
+var<workgroup> sinfo: array<vec4u, 256>; // per poly: lo, hi, packed rgb
+var<workgroup> wbusy: atomic<u32>;
+var<workgroup> sflag: u32;
+
+@compute @workgroup_size(WGS)
+fn splatCoop(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index) li: u32, @builtin(num_workgroups) nwg: vec3u) {
+  let d = P.degree;
+  let k = P.numCoeffs;
+  let ppw = WGS / d;
+  let slot = li / d;
+  let j = li % d;
+  let tid = (wid.x + wid.y * nwg.x) * ppw + slot;
+  let valid = slot < ppw && tid < P.count;
+  let abase = slot * (d + 1u);
+  let zbase = slot * d;
+  if (valid && j == 0u) {
+    var carry = tid; var w = 1.0; var h = 0.0;
+    for (var i = 0u; i <= d; i++) {
+      let s = baseDigits[i] + carry % k;
+      carry = carry / k + s / k;
+      let dg = s % k;
+      sa[abase + i] = coeffs[dg];
+      w = w / f32(k); h += f32(dg) * w;
+    }
+    var hi = d;
+    while (hi > 0u && dot(sa[abase + hi], sa[abase + hi]) < 1e-24) { hi--; }
+    var lo = 0u;
+    while (lo < hi && dot(sa[abase + lo], sa[abase + lo]) < 1e-24) { lo++; }
+    let rgb = vec3u(hue2rgb(h) * 63.0 + 0.5);
+    sinfo[slot] = vec4u(lo, hi, rgb.x | (rgb.y << 8u) | (rgb.z << 16u), 0u);
+  }
+  workgroupBarrier();
+  var info = vec4u(0u);
+  if (valid) { info = sinfo[slot]; }
+  let lo = info.x; let hi = info.y; let m = hi - lo;
+  let live = valid && j < m;
+  var z = vec2f(0.0);
+  var rc = 1.0;
+  if (live) {
+    let alo = sa[abase + lo]; let ahi = sa[abase + hi];
+    let r = pow(sqrt(dot(alo, alo) / dot(ahi, ahi)), 1.0 / f32(m));
+    var cmax = 0.0;
+    for (var i = lo; i < hi; i++) { cmax = max(cmax, dot(sa[abase + i], sa[abase + i])); }
+    rc = 1.0 + sqrt(cmax / dot(ahi, ahi));
+    let t = 6.2831853 * f32(j) / f32(m) + 0.4;
+    z = r * vec2f(cos(t), sin(t));
+    sz[zbase + j] = z;
+  }
+  var done = !live;
+  let tol2 = P.tol * P.tol;
+  workgroupBarrier();
+  for (var it = 0u; it < P.maxIter; it++) {
+    var nz = z;
+    if (!done) {
+      let az = length(z);
+      var p = sa[abase + hi];
+      var dp = vec2f(0.0);
+      var bound = abs(p.x) + abs(p.y);
+      for (var i = hi; i > lo; i--) {
+        let ai = sa[abase + i - 1u];
+        dp = cmul(dp, z) + p;
+        p = cmul(p, z) + ai;
+        bound = bound * az + abs(ai.x) + abs(ai.y);
+      }
+      if (dot(p, p) <= tol2 * bound * bound) {
+        done = true;
+      } else {
+        let ratio = cdiv(p, dp);
+        var s = vec2f(0.0);
+        for (var q = 0u; q < m; q++) {
+          if (q != j) { s += crecip(z - sz[zbase + q]); }
+        }
+        let wj = cdiv(ratio, vec2f(1.0, 0.0) - cmul(ratio, s));
+        nz = z - wj;
+        if (!finite2(nz)) { nz = cmul(z, vec2f(0.5403, 0.8415)); }
+        let n2 = dot(nz, nz);
+        if (n2 > rc * rc) { nz *= rc / sqrt(n2); }
+        if (dot(wj, wj) <= 1e-12 * max(dot(z, z), 1e-6)) { done = true; }
+      }
+    }
+    workgroupBarrier();
+    if (live) { sz[zbase + j] = nz; }
+    z = nz;
+    if (!done) { atomicOr(&wbusy, 1u); }
+    workgroupBarrier();
+    if (li == 0u) { sflag = atomicLoad(&wbusy); atomicStore(&wbusy, 0u); }
+    if (workgroupUniformLoad(&sflag) == 0u) { break; }
+  }
+  if (!done) { atomicAdd(&stats[0], 1u); }
+  let rgb = vec3u(info.z & 255u, (info.z >> 8u) & 255u, (info.z >> 16u) & 255u);
+  if (live) { deposit(z, rgb); }
+  else if (valid && j < hi) { deposit(vec2f(0.0), rgb); }   // the lo roots at the origin
+}
