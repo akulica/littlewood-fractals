@@ -6,7 +6,8 @@ import { fitView, panBy, pixelToWorld, worldToPixel, zoomAt, type View } from '.
 import { getDevice } from '../gpu/device';
 import { Engine, MAX_COEFFS, MAX_DEGREE, type DisplayParams } from '../gpu/engine';
 
-const TARGET_MS = 12; // GPU time per frame; leaves headroom for 60 Hz
+const TARGET_MS = 12; // GPU time per frame while interacting; leaves headroom for 60 Hz
+const IDLE_TARGET_MS = 40; // GPU time per back-to-back chunk while refining (well under the ~2 s Windows TDR)
 const MAX_ITER = 32;
 
 const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -40,8 +41,11 @@ async function start(): Promise<void> {
   let degree = Number(degreeInput.value);
   let view: View | null = null;
   let interacting = false;
-  let budget = 1 << 16;
+  let budget = 1 << 16; // interactive: polynomials per animation frame (TARGET_MS)
+  let idleBudget = 1 << 16; // idle: polynomials per back-to-back chunk (IDLE_TARGET_MS)
   let inFlight = false;
+  let pumping = false;
+  let histChanged = false;
   let displayDirty = true;
   let rootsPerSec = 0;
   let wheelTimer = 0;
@@ -142,9 +146,11 @@ async function start(): Promise<void> {
   };
   canvas.addEventListener('pointerup', endPan);
   canvas.addEventListener('pointercancel', endPan);
-  canvas.addEventListener(
+  // On window, not the canvas: handles sit above the canvas and would otherwise swallow wheel events.
+  window.addEventListener(
     'wheel',
     (e) => {
+      if (e.target instanceof Element && e.target.closest('#panel')) return; // let the panel scroll normally
       e.preventDefault();
       if (!view) return;
       const p = eventToPixel(e);
@@ -200,15 +206,42 @@ async function start(): Promise<void> {
       (done < total ? ` · ~${fmtTime(secondsLeft)} left` : ' · done');
   }
 
-  // ---- frame loop: at most one frame of GPU work in flight, so input never queues behind compute ----
+  // ---- interactive: compute + display in one submit per animation frame, at most one frame in flight,
+  // so input never queues behind compute. Idle: pump() keeps the GPU busy with back-to-back chunks and
+  // frame() only redraws (measured: tying idle compute to rAF left the GPU ~75 % idle at degree 24). ----
+  async function pump(): Promise<void> {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (!interacting) {
+        const enc = device.createCommandEncoder();
+        const count = engine.encodeCompute(enc, idleBudget);
+        if (count === 0) break;
+        const deg = engine.degree;
+        const t0 = performance.now();
+        device.queue.submit([enc.finish()]);
+        histChanged = true;
+        await device.queue.onSubmittedWorkDone();
+        const ms = performance.now() - t0;
+        idleBudget = nextBudget(idleBudget, ms, IDLE_TARGET_MS);
+        rootsPerSec = (count * deg) / (ms / 1000);
+      }
+    } finally {
+      pumping = false;
+    }
+  }
+
   function frame(): void {
     requestAnimationFrame(frame);
     if (inFlight || !view) return;
     const enc = device.createCommandEncoder();
-    const count = engine.encodeCompute(enc, budget);
-    if (count === 0 && !displayDirty) return; // finished and nothing changed
+    let count = 0;
+    if (interacting) count = engine.encodeCompute(enc, budget);
+    else if (!pumping && engine.progress.done < engine.progress.total) void pump();
+    if (count === 0 && !displayDirty && !histChanged) return; // nothing new to show
     engine.encodeDisplay(enc, ctx!.getCurrentTexture().createView(), display());
     displayDirty = false;
+    histChanged = false;
     const deg = engine.degree;
     const t0 = performance.now();
     inFlight = true;
