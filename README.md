@@ -4,17 +4,24 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 
 ![Littlewood polynomials, degree 20](docs/littlewood-d20.png)
 
+## Requirements
+
+- **Node.js 20+** (for the dev server, build and tests).
+- **A WebGPU browser** to use the app (see *Browser support*). It must be opened via `localhost` or `https://`, because WebGPU is disabled on plain `http://` from other hosts.
+- **A real GPU for `npm test`:** the GPU tests run the WGSL kernels through Dawn (the `webgpu` npm package, prebuilt for Windows/macOS/Linux x64). On a machine without a usable GPU, only the 5 pure-logic test files pass.
+- **Windows PowerShell:** if `npm` fails with *"running scripts is disabled on this system"*, either use `npm.cmd` (e.g. `npm.cmd run dev`) or run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
+
 ## Run
 
 ```bash
 npm install
 npm run dev       # http://localhost:5173  (WebGPU needs https:// or localhost)
-npm test          # 44 tests: pure logic + real-GPU tests via Dawn (no browser needed)
+npm test          # 63 tests: pure logic + real-GPU tests via Dawn (no browser needed)
 npm run bench     # throughput + kernel-variant benchmark on this machine's GPU
 npm run build     # static site in dist/
 ```
 
-`scripts/pc-bench.cmd` runs tests and benchmarks on a Windows machine without Node installed. It downloads a portable Node into `%LOCALAPPDATA%` and needs no admin rights.
+`scripts/pc-bench.cmd` runs tests and benchmarks on a Windows machine without Node installed. It downloads a portable Node 22 into `%LOCALAPPDATA%` (no admin rights needed). Run it from a copy of the repo **in a path without spaces**, e.g. `C:\lwf\scripts\pc-bench.cmd`.
 
 ## Controls
 

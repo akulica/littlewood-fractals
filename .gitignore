@@ -1,2 +1,5 @@
 node_modules/
 dist/
+
+# local agent notes (contain machine-specific paths/hosts)
+.hermes/

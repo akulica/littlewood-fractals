@@ -2,7 +2,11 @@
   "name": "littlewood-fractals",
   "private": true,
   "version": "0.1.0",
+  "description": "GPU (WebGPU) visualizer for the roots of all polynomials with coefficients from a chosen set (Littlewood fractals)",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
