@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dispatchGrid, nextBudget, previewDegree } from '../src/core/schedule';
+import { chooseKernel, coopGrid, dispatchGrid, nextBudget, previewDegree } from '../src/core/schedule';
 
 describe('dispatchGrid', () => {
   it('uses one row when it fits', () => {
@@ -32,5 +32,24 @@ describe('previewDegree', () => {
     expect(previewDegree(3, 10, false, 1000)).toBe(5);
     expect(previewDegree(2, 5, true, 1e6)).toBe(5);
     expect(previewDegree(16, 30, false, 10)).toBe(1);
+  });
+});
+
+describe('coopGrid', () => {
+  it('packs floor(256/d) polynomials per workgroup', () => {
+    expect(coopGrid(100, 20)).toEqual({ x: 9, y: 1, polysPerGroup: 12 });
+    expect(coopGrid(256, 1)).toEqual({ x: 1, y: 1, polysPerGroup: 256 });
+    expect(coopGrid(0, 20)).toEqual({ x: 0, y: 0, polysPerGroup: 12 });
+  });
+  it('wraps into a second row past 65535 workgroups', () => {
+    expect(coopGrid(65536 * 8, 32)).toEqual({ x: 65535, y: 2, polysPerGroup: 8 });
+  });
+});
+
+describe('chooseKernel', () => {
+  it('switches to the cooperative kernel only on a >10 % win', () => {
+    expect(chooseKernel(100, 66)).toBe('coop');
+    expect(chooseKernel(100, 95)).toBe('perPoly');
+    expect(chooseKernel(100, 130)).toBe('perPoly');
   });
 });

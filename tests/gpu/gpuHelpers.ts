@@ -36,3 +36,10 @@ export async function runToEnd(device: GPUDevice, engine: Engine, budget: number
   }
   await device.queue.onSubmittedWorkDone();
 }
+
+/** Total root count in a histogram read back with Engine.readHistogram (4 u32 per pixel, count first). */
+export function countSum(h: Uint32Array): number {
+  let s = 0;
+  for (let i = 0; i < h.length; i += 4) s += h[i];
+  return s;
+}

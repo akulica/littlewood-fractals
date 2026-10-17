@@ -1,12 +1,13 @@
-// coop.wgsl — BENCHMARK-ONLY variant: one workgroup thread per ROOT (Jacobi Aberth, shared memory).
-// Same Params/bindings as src/gpu/roots.wgsl. Measured 10-40% slower on Intel Arc 140T; re-measure on RDNA 4.
-const WG: u32 = 64u;
+// coop.wgsl — cooperative variant: one workgroup thread per ROOT, floor(256/d) polynomials per workgroup,
+// Jacobi Aberth sweeps through shared memory. Same Params/bindings 0-4 as roots.wgsl (strideX is unused:
+// the polynomial index comes from num_workgroups). Measured: ~1.5x faster than roots.wgsl on RX 9060 XT
+// (RDNA 4), 1.2-1.3x slower on Intel Arc 140T — Engine.calibrate() picks per GPU at startup.
 
 struct Params {
   degree: u32,      // d: highest term index (polynomial has d+1 coefficient slots)
   numCoeffs: u32,   // k: size of the coefficient set
   count: u32,       // polynomials in this dispatch
-  strideX: u32,     // invocations per dispatch row = workgroupsX * WG
+  strideX: u32,     // unused here (roots.wgsl only)
   width: u32,       // histogram width in pixels
   height: u32,      // histogram height in pixels
   maxIter: u32,     // Aberth sweeps cap
@@ -20,8 +21,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;      // k coefficient values
 @group(0) @binding(2) var<storage, read> baseDigits: array<u32>;    // d+1 base-k digits of this dispatch's first index; digit i picks a_i
 @group(0) @binding(3) var<storage, read_write> hist: array<atomic<u32>>;  // 4 u32 per pixel: count, r, g, b
-@group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>; // [0] = unconverged polynomials
-
+@group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>; // [0] = unconverged ROOTS (per-thread here)
 
 fn cmul(p: vec2f, q: vec2f) -> vec2f { return vec2f(p.x * q.x - p.y * q.y, p.x * q.y + p.y * q.x); }
 fn cdiv(p: vec2f, q: vec2f) -> vec2f {
@@ -34,7 +34,6 @@ fn finite2(v: vec2f) -> bool {
   let e = bitcast<vec2u>(v) & vec2u(0x7f800000u);
   return all(e != vec2u(0x7f800000u));
 }
-
 
 fn hue2rgb(h: f32) -> vec3f {
   return clamp(abs(fract(h + vec3f(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, vec3f(0.0), vec3f(1.0));

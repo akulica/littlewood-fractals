@@ -1,6 +1,7 @@
 import { totalPolys } from './enumeration';
 
 export const WORKGROUP = 64; // must equal WG in roots.wgsl
+export const COOP_WORKGROUP = 256; // must equal WGS in coop.wgsl
 export const MAX_WG_PER_DIM = 65535;
 export const MIN_BUDGET = 1024;
 export const MAX_BUDGET = 1 << 22;
@@ -24,4 +25,20 @@ export function previewDegree(k: number, degree: number, fixable: boolean, budge
   let d = degree;
   while (d > 1 && totalPolys(k, d, fixable) > BigInt(Math.floor(budget))) d--;
   return d;
+}
+
+export type Kernel = 'perPoly' | 'coop';
+
+/** Cooperative kernel: one thread per root, floor(256/d) polynomials per workgroup, 2-D wrap like dispatchGrid. */
+export function coopGrid(count: number, degree: number): { x: number; y: number; polysPerGroup: number } {
+  const polysPerGroup = Math.floor(COOP_WORKGROUP / degree);
+  if (count <= 0) return { x: 0, y: 0, polysPerGroup };
+  const groups = Math.ceil(count / polysPerGroup);
+  const x = Math.min(groups, MAX_WG_PER_DIM);
+  return { x, y: Math.ceil(groups / x), polysPerGroup };
+}
+
+/** Cooperative only on a clear (>10 %) win: per-polynomial is the default and timing noise must not flip it. */
+export function chooseKernel(perPolyMs: number, coopMs: number): Kernel {
+  return coopMs < 0.9 * perPolyMs ? 'coop' : 'perPoly';
 }
