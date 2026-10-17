@@ -1,4 +1,4 @@
-/** Browser WebGPU device with the largest storage-buffer limits the adapter allows (big histograms). */
+/** Browser WebGPU device with the largest buffer/texture limits the adapter allows (big histograms and exports). */
 export async function getDevice(): Promise<GPUDevice> {
   if (!('gpu' in navigator)) {
     throw new Error(
@@ -12,6 +12,7 @@ export async function getDevice(): Promise<GPUDevice> {
     requiredLimits: {
       maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
       maxBufferSize: adapter.limits.maxBufferSize,
+      maxTextureDimension2D: adapter.limits.maxTextureDimension2D, // bigger PNG exports (default is 8192)
     },
   });
 }

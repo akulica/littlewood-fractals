@@ -26,6 +26,7 @@ npm run build     # static site in dist/
 | Pan / zoom | Drag the background / mouse wheel (zooms around the cursor) / **Zoom ±** / **Reset view** |
 | Colour | Hue by low-order coefficients (Egan's palette idea), or inferno density. Exposure and gamma apply instantly, without recomputing. |
 | Kernel | **auto** (default) times both GPU kernels at startup and keeps the faster one. The choice and the measured ratio are shown in the status line. You can also force either kernel. |
+| Save PNG | Type the width × height, then **Save PNG**. The image is re-rendered at that size (never upscaled), shows everything currently on screen (extra margin if the aspect differs), and matches the screen's brightness. Up to 64 M pixels (e.g. 8192×8192 or 16384×4096) within the GPU's limits. Live rendering pauses while it exports. |
 
 ## Browser support
 
@@ -60,6 +61,23 @@ Kernel variants (`tests/gpu/variants.perf.ts`, ratio of cooperative time to per-
 The throughput table above uses the per-polynomial kernel. With auto-selection the PC uses the cooperative kernel, which brings degree 20 down to **50 ms** and degree 24 down to **0.71 s** (`calibrate: coop … coop/perPoly = 0.72` in `bench-pc.log`).
 
 Since the winner depends on the GPU, both kernels ship. At startup `Engine.calibrate()` runs 2¹⁸ degree-20 Littlewood polynomials on each kernel: interleaved, best of 3 after a warm-up, about 0.1–0.5 s in total. It switches to the cooperative kernel only if that wins by more than 10 %, so timing noise can't flip the choice on GPUs where the two are close.
+
+## How roots are stored (they aren't)
+
+- **While solving:** each root lives in GPU registers or workgroup memory as an f32 `vec2f` (8 bytes, about 7 significant digits).
+- **Once converged:** it becomes a +1 on one pixel of a histogram with 4 × u32 per pixel: count, plus R, G, B sums with 0–63 added per root. After that its position is known only to one pixel.
+- **Memory therefore scales with pixels, not roots:**
+  - 1920×1080 is 33 MB, whether that's 1 root or 10 billion;
+  - 8K export is about 531 MB.
+- **For comparison, storing 100 M roots** would take 800 MB as f32 or 1.6 GB as f64. Littlewood degree 24 alone has 403 M roots.
+
+**Export pipeline:**
+1. A private `Engine` fills a W×H histogram.
+2. It tone-maps into an `rgba8unorm` texture.
+3. The texture is read back, with the 256-byte GPU row padding removed.
+4. `src/core/png.ts` encodes the PNG: 8-bit RGB, deflate via `CompressionStream`, no canvas, so no browser canvas-size cap.
+
+Root counts are multiplied by (export px ÷ screen px)² before tone-mapping, so a 4K export is as bright as the screen.
 
 ## How it works
 

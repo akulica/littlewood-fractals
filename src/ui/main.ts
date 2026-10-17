@@ -1,10 +1,12 @@
 import './style.css';
 import { formatComplex, parseCoefficientList, type Complex } from '../core/complex';
+import { exportSizeError, exportView } from '../core/export';
 import { leadingFixable } from '../core/enumeration';
+import { encodePng } from '../core/png';
 import { nextBudget, previewDegree, type Kernel } from '../core/schedule';
 import { fitView, panBy, pixelToWorld, worldToPixel, zoomAt, type View } from '../core/view';
 import { getDevice } from '../gpu/device';
-import { Engine, MAX_COEFFS, MAX_DEGREE, type Calibration, type DisplayParams } from '../gpu/engine';
+import { Engine, MAX_COEFFS, MAX_DEGREE, renderImage, type Calibration, type DisplayParams } from '../gpu/engine';
 
 const TARGET_MS = 12; // GPU time per frame while interacting; leaves headroom for 60 Hz
 const IDLE_TARGET_MS = 40; // GPU time per back-to-back chunk while refining (well under the ~2 s Windows TDR)
@@ -20,6 +22,10 @@ const kernelSelect = el<HTMLSelectElement>('kernel');
 const exposureInput = el<HTMLInputElement>('exposure');
 const gammaInput = el<HTMLInputElement>('gamma');
 const statusOut = el<HTMLOutputElement>('status');
+const exportWInput = el<HTMLInputElement>('exportW');
+const exportHInput = el<HTMLInputElement>('exportH');
+const saveButton = el<HTMLButtonElement>('savePng');
+const exportStatus = el<HTMLOutputElement>('exportStatus');
 
 function showError(message: string): void {
   const box = el<HTMLDivElement>('error');
@@ -46,6 +52,7 @@ async function start(): Promise<void> {
   let idleBudget = 1 << 16; // idle: polynomials per back-to-back chunk (IDLE_TARGET_MS)
   let inFlight = false;
   let pumping = false;
+  let exporting = false; // export owns the GPU: the live view pauses its compute meanwhile
   let histChanged = false;
   let displayDirty = true;
   let rootsPerSec = 0;
@@ -220,7 +227,7 @@ async function start(): Promise<void> {
     if (pumping) return;
     pumping = true;
     try {
-      while (!interacting) {
+      while (!interacting && !exporting) {
         const enc = device.createCommandEncoder();
         const count = engine.encodeCompute(enc, idleBudget);
         if (count === 0) break;
@@ -243,7 +250,9 @@ async function start(): Promise<void> {
     if (inFlight || !view) return;
     const enc = device.createCommandEncoder();
     let count = 0;
-    if (interacting) count = engine.encodeCompute(enc, budget);
+    if (exporting) {
+      // live compute paused; still redraw if display settings change
+    } else if (interacting) count = engine.encodeCompute(enc, budget);
     else if (!pumping && engine.progress.done < engine.progress.total) void pump();
     if (count === 0 && !displayDirty && !histChanged) return; // nothing new to show
     engine.encodeDisplay(enc, ctx!.getCurrentTexture().createView(), display());
@@ -263,6 +272,53 @@ async function start(): Promise<void> {
       updateStatus();
     });
   }
+
+  // ---- PNG export: re-render at the requested size off-screen (a private histogram), never upscale ----
+  function setExportStatus(text: string, isError = false): void {
+    exportStatus.textContent = text;
+    exportStatus.classList.toggle('error', isError);
+  }
+  saveButton.addEventListener('click', async () => {
+    if (!view || exporting) return;
+    const width = Number(exportWInput.value);
+    const height = Number(exportHInput.value);
+    const problem = exportSizeError(width, height, device.limits);
+    if (problem) return setExportStatus(problem, true);
+    setExportStatus(`exporting ${width}×${height}: starting…`);
+    exporting = true;
+    saveButton.disabled = true;
+    const t0 = performance.now();
+    try {
+      const outView = exportView(view, canvas.width, canvas.height, width, height);
+      const density = outView.pxPerUnit / view.pxPerUnit; // export pixels per screen pixel, per axis
+      const rgba = await renderImage(
+        device,
+        {
+          kernel: engine.kernel,
+          params: { coeffs, degree, view: outView, maxIter: MAX_ITER },
+          display: { ...display(), countScale: density * density }, // same brightness as on screen
+          width,
+          height,
+        },
+        (done, total) => setExportStatus(`exporting ${width}×${height}: ${(Number((done * 1000n) / total) / 10).toFixed(1)} %`),
+      );
+      setExportStatus(`encoding PNG…`);
+      const blob = await encodePng(rgba, width, height);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `littlewood-d${degree}-k${coeffs.length}-${width}x${height}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+      setExportStatus(`saved ${a.download} (${(blob.size / 2 ** 20).toFixed(1)} MB, ${((performance.now() - t0) / 1000).toFixed(1)} s)`);
+    } catch (err) {
+      setExportStatus(`export failed: ${err instanceof Error ? err.message : String(err)}`, true);
+    } finally {
+      exporting = false;
+      saveButton.disabled = false;
+      displayDirty = true;
+    }
+  });
+  exportWInput.max = exportHInput.max = String(device.limits.maxTextureDimension2D);
 
   // Pick the faster splat kernel for this GPU before the first frame (~0.1-0.5 s; the canvas stays black meanwhile).
   sizeCanvas();

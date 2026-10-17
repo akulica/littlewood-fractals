@@ -33,6 +33,9 @@ export interface DisplayParams {
   colorMode: 0 | 1;
   exposure: number;
   gamma: number;
+  /** Multiplies root counts before tone-mapping (default 1). An export at k times the screen's pixels per unit
+   * gets about k^2 fewer roots per pixel; countScale = k^2 makes it look like the screen. */
+  countScale?: number;
 }
 
 /**
@@ -208,7 +211,7 @@ export class Engine {
     if (!this.reduceBG || !this.renderBG) return;
     const ab = new ArrayBuffer(VIEW_BYTES);
     new Uint32Array(ab).set([this.width, this.height, d.colorMode, 0]);
-    new Float32Array(ab).set([d.exposure, d.gamma], 4);
+    new Float32Array(ab).set([d.exposure, d.gamma, d.countScale ?? 1], 4);
     this.device.queue.writeBuffer(this.viewBuf, 0, ab);
     enc.clearBuffer(this.maxBuf);
     const c = enc.beginComputePass();

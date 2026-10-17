@@ -31,6 +31,13 @@
         <button id="zoomOut" type="button">Zoom −</button>
         <button id="reset" type="button">Reset view</button>
       </div>
+      <div class="row export">
+        <input id="exportW" type="number" min="1" value="3840" aria-label="export width" />
+        <span>×</span>
+        <input id="exportH" type="number" min="1" value="2160" aria-label="export height" />
+        <button id="savePng" type="button">Save PNG</button>
+      </div>
+      <output id="exportStatus"></output>
       <output id="status"></output>
     </form>
     <div id="error" hidden></div>

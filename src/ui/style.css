@@ -10,3 +10,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color:
 #coeffs.invalid { outline: 2px solid #e44; }
 #status { white-space: pre-line; font-variant-numeric: tabular-nums; }
 #error { position: fixed; inset: 30% 10% auto; padding: 16px; background: #400; color: #fff; border-radius: 8px; }
+#panel .export { align-items: center; }
+#panel .export input { width: 70px; }
+#exportStatus { color: #9cf; }
+#exportStatus.error { color: #f88; }

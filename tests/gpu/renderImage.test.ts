@@ -49,3 +49,35 @@ describe.each(['perPoly', 'coop'] as Kernel[])('renderImage (%s kernel)', (kerne
     expect(errors).toEqual([]);
   });
 });
+
+describe('renderImage brightness', () => {
+  const meanLit = (rgba: Uint8ClampedArray) => {
+    let sum = 0;
+    let n = 0;
+    for (let i = 0; i < rgba.length; i += 4) {
+      const v = rgba[i] + rgba[i + 1] + rgba[i + 2];
+      if (v > 0) {
+        sum += v;
+        n++;
+      }
+    }
+    return sum / n;
+  };
+  const render = (size: number, countScale: number) =>
+    renderImage(device, {
+      kernel: 'perPoly',
+      params: { coeffs: LW, degree: 14, view: fitView(size, size, 2.2), maxIter: 32 },
+      display: { colorMode: 0, exposure: 1, gamma: 0.6, countScale },
+      width: size,
+      height: size,
+    });
+
+  it('countScale = (pixel-density ratio)^2 makes a 3x larger render as bright as the small one', async () => {
+    const small = meanLit(await render(200, 1));
+    const bigRaw = meanLit(await render(600, 1));
+    const bigScaled = meanLit(await render(600, 9));
+    console.log(`mean lit brightness: small ${small.toFixed(1)}, 3x raw ${bigRaw.toFixed(1)}, 3x scaled ${bigScaled.toFixed(1)}`);
+    expect(bigRaw / small).toBeLessThan(0.85); // the problem: sparse pixels look darker
+    expect(Math.abs(bigScaled / small - 1)).toBeLessThan(0.1); // the fix
+  });
+});
