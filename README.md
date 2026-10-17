@@ -25,6 +25,7 @@ npm run build     # static site in dist/
 | Degree | 1–32 |
 | Pan / zoom | Drag the background / mouse wheel (zooms around the cursor) / **Zoom ±** / **Reset view** |
 | Colour | Hue by low-order coefficients (Egan's palette idea), or inferno density. Exposure and gamma apply instantly, without recomputing. |
+| Kernel | **auto** (default) times both GPU kernels at startup and keeps the faster one. The choice and the measured ratio are shown in the status line. You can also force either kernel. |
 
 ## Browser support
 
@@ -53,15 +54,20 @@ Kernel variants (`tests/gpu/variants.perf.ts`, ratio of cooperative time to per-
 
 | GPU | d=20 | d=24 |
 |---|---|---|
-| RX 9060 XT (RDNA 4) | 0.69 | 0.66 |
+| RX 9060 XT (RDNA 4) | 0.69–0.71 | 0.60–0.66 |
 | Arc 140T | 1.19–1.33 | 1.15–1.30 |
 
-The shipped kernel is per-polynomial. Auto-selecting the faster kernel per GPU is the obvious next step.
+The throughput table above uses the per-polynomial kernel. With auto-selection the PC uses the cooperative kernel, which brings degree 20 down to **50 ms** and degree 24 down to **0.71 s** (`calibrate: coop … coop/perPoly = 0.72` in `bench-pc.log`).
+
+Since the winner depends on the GPU, both kernels ship. At startup `Engine.calibrate()` runs 2¹⁸ degree-20 Littlewood polynomials on each kernel: interleaved, best of 3 after a warm-up, about 0.1–0.5 s in total. It switches to the cooperative kernel only if that wins by more than 10 %, so timing noise can't flip the choice on GPUs where the two are close.
 
 ## How it works
 
 - **No QR / companion matrices.** Dense QR costs about 10n³ flops per polynomial, and the n×n complex matrix spills out of registers. Batched non-symmetric eigensolvers exist only in CUDA libraries.
-- **Ehrlich–Aberth, one polynomial per GPU thread.** Cubic convergence, Gauss–Seidel updates, f32. Three guards make it robust:
+- **Two kernels, picked per GPU.**
+  - `roots.wgsl`: one polynomial per thread, Gauss–Seidel. Wins on Intel Arc.
+  - `coop.wgsl`: one root per thread, floor(256/d) polynomials per workgroup, Jacobi sweeps through shared memory. Measured about 1.5× faster on AMD RDNA 4 (RX 9060 XT), and 1.2–1.3× slower on Intel Arc.
+- **Ehrlich–Aberth (`roots.wgsl`: one polynomial per GPU thread).** Cubic convergence, Gauss–Seidel updates, f32. Three guards make it robust:
   - a backward-error stop, so multiple roots don't burn iterations;
   - clamping iterates to the Cauchy root bound;
   - an integer inf/NaN check, because WGSL may assume floats are finite.
