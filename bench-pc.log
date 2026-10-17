@@ -1,0 +1,90 @@
+** WARNING: connection is not using a post-quantum key exchange algorithm.
+** This session may be vulnerable to "store now, decrypt later" attacks.
+** The server may need to be upgraded. See https://openssh.com/pq.html
+Downloading portable Node 22.22.3 ...
+
+added 40 packages in 11s
+npm notice
+npm notice New major version of npm available! 10.9.8 -> 12.2.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.0
+npm notice To update run: npm install -g npm@12.2.0
+npm notice
+
+> littlewood-fractals@0.1.0 test
+> vitest run
+
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.5 [39m[90mC:/lwf-bench[39m
+
+ [32m✓[39m tests/view.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/enumeration.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/complex.test.ts [2m([22m[2m16 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/schedule.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+ [32m✓[39m tests/aberthRef.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/gpu/smoke.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 20[2mms[22m[39m
+ [32m✓[39m tests/gpu/roots.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 81[2mms[22m[39m
+ [32m✓[39m tests/gpu/engine.test.ts [2m([22m[2m3 tests[22m[2m)[22m[33m 608[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m8 passed[39m[22m[90m (8)[39m
+[2m      Tests [22m [1m[32m44 passed[39m[22m[90m (44)[39m
+[2m   Start at [22m 11:44:12
+[2m   Duration [22m 1.23s[2m (import 57%, tests 25%, transform 16%, worker 1%)[22m
+
+
+> littlewood-fractals@0.1.0 bench
+> vitest run --config vitest.perf.config.ts
+
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.5 [39m[90mC:/lwf-bench[39m
+
+[90mstdout[2m | tests/gpu/variants.perf.ts
+[22m[39madapter: amd rdna-4 D3D12 driver version 32.0.31041.1004
+
+[90mstdout[2m | tests/gpu/variants.perf.ts[2m > [22m[2mLittlewood d=16: per-polynomial vs cooperative
+[22m[39md=16: perPoly 6 ms, coop 4 ms (coop/perPoly = 0.59)
+
+[90mstdout[2m | tests/gpu/variants.perf.ts[2m > [22m[2mLittlewood d=20: per-polynomial vs cooperative
+[22m[39md=20: perPoly 66 ms, coop 45 ms (coop/perPoly = 0.69)
+
+[90mstdout[2m | tests/gpu/variants.perf.ts[2m > [22m[2mLittlewood d=24: per-polynomial vs cooperative
+[22m[39md=24: perPoly 1118 ms, coop 738 ms (coop/perPoly = 0.66)
+
+ [32m✓[39m tests/gpu/variants.perf.ts [2m([22m[2m3 tests[22m[2m)[22m[33m 2022[2mms[22m[39m
+   [33m[2m✓[22m[39m Littlewood d=24: per-polynomial vs cooperative[33m 1865[2mms[22m[39m
+[90mstdout[2m | tests/gpu/throughput.perf.ts
+[22m[39madapter: amd rdna-4 D3D12 driver version 32.0.31041.1004
+
+[90mstdout[2m | tests/gpu/throughput.perf.ts[2m > [22m[2mLittlewood d=16
+[22m[39mLittlewood d=16 [all chunks queued]: 65,536 polys in 4 ms = 240.2 M roots/s
+
+[90mstdout[2m | tests/gpu/throughput.perf.ts[2m > [22m[2mLittlewood d=16
+[22m[39mLittlewood d=16 [one chunk in flight]: 65,536 polys in 6 ms = 168.5 M roots/s
+
+[90mstdout[2m | tests/gpu/throughput.perf.ts[2m > [22m[2mLittlewood d=20
+[22m[39mLittlewood d=20 [all chunks queued]: 1,048,576 polys in 71 ms = 293.6 M roots/s
+
+[90mstdout[2m | tests/gpu/throughput.perf.ts[2m > [22m[2mLittlewood d=20
+[22m[39mLittlewood d=20 [one chunk in flight]: 1,048,576 polys in 67 ms = 312.9 M roots/s
+
+[90mstdout[2m | tests/gpu/throughput.perf.ts[2m > [22m[2mLittlewood d=24
+[22m[39mLittlewood d=24 [all chunks queued]: 16,777,216 polys in 1077 ms = 373.9 M roots/s
+
+[90mstdout[2m | tests/gpu/throughput.perf.ts[2m > [22m[2mLittlewood d=24
+[22m[39mLittlewood d=24 [one chunk in flight]: 16,777,216 polys in 956 ms = 421.4 M roots/s
+
+[90mstdout[2m | tests/gpu/throughput.perf.ts[2m > [22m[2m3 complex coeffs d=14
+[22m[39m3 complex coeffs d=14 [all chunks queued]: 14,348,907 polys in 265 ms = 758.1 M roots/s
+
+[90mstdout[2m | tests/gpu/throughput.perf.ts[2m > [22m[2m3 complex coeffs d=14
+[22m[39m3 complex coeffs d=14 [one chunk in flight]: 14,348,907 polys in 321 ms = 626.8 M roots/s
+
+ [32m✓[39m tests/gpu/throughput.perf.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 3372[2mms[22m[39m
+   [33m[2m✓[22m[39m Littlewood d=24[33m 2154[2mms[22m[39m
+   [33m[2m✓[22m[39m 3 complex coeffs d=14[33m 705[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m2 passed[39m[22m[90m (2)[39m
+[2m      Tests [22m [1m[32m7 passed[39m[22m[90m (7)[39m
+[2m   Start at [22m 11:44:14
+[2m   Duration [22m 6.22s[2m (tests 89%, import 10%, transform 1%)[22m
+
+EXIT 0
