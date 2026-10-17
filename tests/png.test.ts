@@ -4,14 +4,14 @@ import { crc32, encodePng } from '../src/core/png';
 const u32 = (b: Uint8Array, o: number) => new DataView(b.buffer, b.byteOffset).getUint32(o);
 const ascii = (b: Uint8Array, o: number) => String.fromCharCode(...b.subarray(o, o + 4));
 
-async function inflate(data: Uint8Array): Promise<Uint8Array> {
+async function inflate(data: Uint8Array<ArrayBuffer>): Promise<Uint8Array> {
   const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 /** Splits a PNG into chunks, verifying every CRC. */
-function chunks(png: Uint8Array): { type: string; data: Uint8Array }[] {
-  const out: { type: string; data: Uint8Array }[] = [];
+function chunks(png: Uint8Array<ArrayBuffer>): { type: string; data: Uint8Array<ArrayBuffer> }[] {
+  const out: { type: string; data: Uint8Array<ArrayBuffer> }[] = [];
   for (let o = 8; o < png.length; ) {
     const len = u32(png, o);
     const type = ascii(png, o + 4);

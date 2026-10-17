@@ -3,7 +3,7 @@ import coopSrc from './coop.wgsl?raw';
 import displaySrc from './display.wgsl?raw';
 import type { Complex } from '../core/complex';
 import { indexToDigits, leadingFixable, totalPolys } from '../core/enumeration';
-import { chooseKernel, coopGrid, dispatchGrid, type Kernel } from '../core/schedule';
+import { chooseKernel, coopGrid, dispatchGrid, nextBudget, type Kernel } from '../core/schedule';
 import type { View } from '../core/view';
 
 export const MAX_DEGREE = 32; // = MAX_DEG in roots.wgsl
@@ -253,6 +253,13 @@ export class Engine {
     return result;
   }
 
+  /** Frees every GPU buffer (the histogram can be hundreds of MB). The engine is unusable afterwards. */
+  destroy(): void {
+    this.hist?.destroy();
+    this.hist = null;
+    for (const b of [this.paramsBuf, this.coeffBuf, this.digitsBuf, this.statsBuf, this.viewBuf, this.maxBuf]) b.destroy();
+  }
+
   async readHistogram(): Promise<Uint32Array> {
     if (!this.hist) return new Uint32Array(0);
     return new Uint32Array(await this.readBuffer(this.hist, this.width * this.height * 16));
@@ -279,5 +286,62 @@ export class Engine {
     rb.unmap();
     rb.destroy();
     return copy;
+  }
+}
+
+export interface ImageRequest {
+  kernel: Kernel;
+  params: FractalParams;
+  display: DisplayParams;
+  width: number;
+  height: number;
+}
+
+const EXPORT_TARGET_MS = 100; // per chunk while exporting: big chunks, still far below the ~2 s Windows TDR
+
+/**
+ * Off-screen render at an arbitrary size: a private Engine computes every polynomial into a width x height
+ * histogram, tone-maps it into an rgba8unorm texture and reads it back as tightly packed RGBA (row padding
+ * removed). Size limits are the caller's job (see core/export.ts).
+ */
+export async function renderImage(
+  device: GPUDevice,
+  req: ImageRequest,
+  onProgress?: (done: bigint, total: bigint) => void,
+): Promise<Uint8ClampedArray> {
+  const { width, height } = req;
+  const engine = new Engine(device, 'rgba8unorm');
+  const tex = device.createTexture({ size: [width, height], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+  const bytesPerRow = Math.ceil((width * 4) / 256) * 256; // copyTextureToBuffer requires 256-byte rows
+  const readback = device.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  try {
+    engine.kernel = req.kernel;
+    engine.resize(width, height);
+    engine.setParams(req.params);
+    let budget = 1 << 16;
+    for (;;) {
+      const enc = device.createCommandEncoder();
+      const count = engine.encodeCompute(enc, budget);
+      const t0 = performance.now();
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      if (count === 0) break;
+      budget = nextBudget(budget, performance.now() - t0, EXPORT_TARGET_MS);
+      onProgress?.(engine.progress.done, engine.progress.total);
+    }
+    const enc = device.createCommandEncoder();
+    engine.encodeDisplay(enc, tex.createView(), req.display);
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: readback, bytesPerRow }, [width, height]);
+    device.queue.submit([enc.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(readback.getMappedRange());
+    const out = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) out.set(src.subarray(y * bytesPerRow, y * bytesPerRow + width * 4), y * width * 4);
+    readback.unmap();
+    return out;
+  } finally {
+    readback.destroy();
+    tex.destroy();
+    engine.destroy();
   }
 }
