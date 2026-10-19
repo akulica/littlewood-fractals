@@ -7,6 +7,7 @@
   </head>
   <body>
     <canvas id="view"></canvas>
+    <svg id="keyPaths" aria-hidden="true"></svg>
     <div id="handles"></div>
     <form id="panel" onsubmit="return false">
       <label>Degree <input id="degree" type="number" min="1" max="32" value="20" /></label>
@@ -38,6 +39,53 @@
         <button id="savePng" type="button">Save PNG</button>
       </div>
       <output id="exportStatus"></output>
+      <details id="anim">
+        <summary>Animation <span id="keyCount"></span></summary>
+        <div class="row">
+          <button id="addKey" type="button" title="Store the current coefficients as the next keyframe">Add keyframe</button>
+          <button id="clearKeys" type="button">Clear</button>
+        </div>
+        <ol id="keyList"></ol>
+        <input id="timeline" type="range" min="0" max="1" step="0.001" value="0" aria-label="timeline" disabled />
+        <div class="row">
+          <button id="play" type="button" disabled>▶ Preview</button>
+          <label class="check"><input id="loop" type="checkbox" /> Loop back to start</label>
+        </div>
+        <label>Frames <input id="frames" type="number" min="2" max="100000" value="120" /></label>
+        <label>FPS <input id="fps" type="number" min="1" max="120" value="30" /></label>
+        <label>Easing
+          <select id="easing">
+            <option value="smooth">smooth (ease in/out)</option>
+            <option value="linear">linear</option>
+          </select>
+        </label>
+        <label>Brightness
+          <select id="brightness">
+            <option value="locked">locked to first frame</option>
+            <option value="perFrame">per frame</option>
+          </select>
+        </label>
+        <label>Quality
+          <select id="quality">
+            <option value="1">100 % (final)</option>
+            <option value="0.5">50 % draft</option>
+            <option value="0.25">25 % draft</option>
+            <option value="0.1">10 % draft</option>
+          </select>
+        </label>
+        <label>Output
+          <select id="output">
+            <option value="mp4">MP4 (H.264)</option>
+            <option value="mp4+png">MP4 + PNG frames</option>
+            <option value="png">PNG frames</option>
+          </select>
+        </label>
+        <div class="row">
+          <button id="renderAnim" type="button" title="Size: the W × H above">Render</button>
+          <button id="cancelAnim" type="button" disabled>Cancel</button>
+        </div>
+        <output id="animStatus"></output>
+      </details>
       <output id="status"></output>
     </form>
     <div id="error" hidden></div>

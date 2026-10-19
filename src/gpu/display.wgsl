@@ -7,7 +7,7 @@ struct View {
   exposure: f32,    // multiplies the normalised log density
   gamma: f32,       // < 1 lifts faint structure
   countScale: f32,  // counts are multiplied by this before tone-mapping (exports: area ratio, so they match the screen)
-  _pad2: f32,
+  fixedMax: f32,    // > 0: tone-map against this count instead of the densest pixel (animation: locked brightness)
 };
 
 @group(0) @binding(0) var<uniform> V: View;
@@ -51,7 +51,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let idx = (u32(pos.y) * V.width + u32(pos.x)) * 4u;
   let c = f32(hist[idx]);
   if (c == 0.0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
-  let m = max(f32(maxIn), 1.0);
+  let m = select(max(f32(maxIn), 1.0), V.fixedMax, V.fixedMax > 0.0);
   let t = clamp(pow(log(1.0 + c * V.countScale) / log(1.0 + m * V.countScale), V.gamma) * V.exposure, 0.0, 1.0);
   if (V.colorMode == 1u) {
     let avg = vec3f(f32(hist[idx + 1u]), f32(hist[idx + 2u]), f32(hist[idx + 3u])) / (63.0 * c);

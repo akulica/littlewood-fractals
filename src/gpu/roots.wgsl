@@ -16,19 +16,24 @@ struct Params {
   center: vec2f,    // complex value at the canvas centre
   pxPerUnit: f32,   // pixels per unit of the complex plane
   tol: f32,         // backward-error stop: |p(z)| <= tol * sum|a_i||z|^i  (engine uses 1e-5)
+  frames: u32,      // splatFrames only: coefficient sets in `coeffs` and histogram slices in `hist`
+  _pad0: u32,       // 64 bytes, same layout as coop.wgsl
+  _pad1: u32,
+  _pad2: u32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
-@group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;      // k coefficient values
+@group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;      // k coefficient values (splatFrames: frames * k)
 // Base-k digits (little-endian, digit i picks a_i): [0..=32] = this dispatch's first index, [33..=65] = stride G.
 @group(0) @binding(2) var<storage, read> digits: array<u32>;
-@group(0) @binding(3) var<storage, read_write> hist: array<atomic<u32>>;  // 4 u32 per pixel: count, r, g, b
-@group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>; // [0] = unconverged polynomials
+@group(0) @binding(3) var<storage, read_write> hist: array<atomic<u32>>;  // 4 u32 per pixel: count, r, g, b (splatFrames: one W*H slice per frame)
+@group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>; // [0] = unconverged polynomials (splatFrames: polynomial-frames)
 @group(0) @binding(5) var<storage, read_write> outRoots: array<vec2f>;    // debugRoots only: degree slots per polynomial
 
 var<private> a: array<vec2f, MAX_DEG + 1u>;
 var<private> z: array<vec2f, MAX_DEG>;
 var<private> hue: f32;
+var<private> dg: array<u32, MAX_DEG + 1u>;  // splatFrames: this thread's digits, decoded once for all frames
 
 fn cmul(p: vec2f, q: vec2f) -> vec2f { return vec2f(p.x * q.x - p.y * q.y, p.x * q.y + p.y * q.x); }
 fn cdiv(p: vec2f, q: vec2f) -> vec2f {
@@ -64,6 +69,10 @@ fn loadPoly(tid: u32) -> vec2u {
     w = w / f32(k);
     hue += f32(dg) * w;     // low-order terms dominate the hue (Egan's palette idea)
   }
+  return trim();
+}
+
+fn trim() -> vec2u {
   var hi = P.degree;
   while (hi > 0u && dot(a[hi], a[hi]) < 1e-24) { hi--; }
   var lo = 0u;
@@ -71,20 +80,57 @@ fn loadPoly(tid: u32) -> vec2u {
   return vec2u(lo, hi);
 }
 
+// splatFrames: loadPoly's digits and hue, kept in dg[] so every frame reuses them.
+fn decodeDigits(tid: u32) {
+  let k = P.numCoeffs;
+  var carry = 0u;
+  var w = 1.0;
+  hue = 0.0;
+  for (var i = 0u; i <= P.degree; i++) {
+    var d = 0u;
+    if (i < P.freeDigits) {
+      let v = digits[i] + digits[STEP + i] * tid + carry;
+      d = v % k;
+      carry = v / k;
+    }
+    dg[i] = d;
+    w = w / f32(k);
+    hue += f32(d) * w;
+  }
+}
+
+// Frame f's polynomial for the digits in dg[]; returns (lo, hi) as loadPoly does.
+fn loadFrame(f: u32) -> vec2u {
+  let base = f * P.numCoeffs;
+  for (var i = 0u; i <= P.degree; i++) { a[i] = coeffs[base + dg[i]]; }
+  return trim();
+}
+
 // Roots of sum_{i=lo..hi} a[i] z^(i-lo) into z[0..hi-lo). Returns false if maxIter was hit.
 fn solve(lo: u32, hi: u32) -> bool {
+  if (hi == lo) { return true; }
+  coldStart(lo, hi);
+  return polish(lo, hi);
+}
+
+// Initial guesses on a circle of radius = geometric mean of |roots|. Needs hi > lo.
+fn coldStart(lo: u32, hi: u32) {
   let m = hi - lo;
-  if (m == 0u) { return true; }
-  let r = pow(sqrt(dot(a[lo], a[lo]) / dot(a[hi], a[hi])), 1.0 / f32(m)); // geometric mean of |roots|
+  let r = pow(sqrt(dot(a[lo], a[lo]) / dot(a[hi], a[hi])), 1.0 / f32(m));
+  for (var j = 0u; j < m; j++) {
+    let t = 6.2831853 * f32(j) / f32(m) + 0.4;  // 0.4 rad offset breaks conjugate symmetry
+    z[j] = r * vec2f(cos(t), sin(t));
+  }
+}
+
+// Aberth sweeps from whatever z[0..hi-lo) holds (cold guesses or the previous frame's roots). Needs hi > lo.
+fn polish(lo: u32, hi: u32) -> bool {
+  let m = hi - lo;
   // Cauchy bound: every root has |z| <= 1 + max |a_i / a_hi|. Clamping iterates to it prevents f32 overflow.
   var cmax = 0.0;
   for (var i = lo; i < hi; i++) { cmax = max(cmax, dot(a[i], a[i])); }
   let rc = 1.0 + sqrt(cmax / dot(a[hi], a[hi]));
   let rc2 = rc * rc;
-  for (var j = 0u; j < m; j++) {
-    let t = 6.2831853 * f32(j) / f32(m) + 0.4;  // 0.4 rad offset breaks conjugate symmetry
-    z[j] = r * vec2f(cos(t), sin(t));
-  }
   let full = select((1u << m) - 1u, 0xffffffffu, m == 32u);
   var done = 0u;
   let tol2 = P.tol * P.tol;
@@ -127,12 +173,13 @@ fn hue2rgb(h: f32) -> vec3f {
   return clamp(abs(fract(h + vec3f(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, vec3f(0.0), vec3f(1.0));
 }
 
-fn deposit(r: vec2f, rgb: vec3u) {
+// slice: u32 offset of the frame's histogram (0 except in splatFrames).
+fn deposit(r: vec2f, rgb: vec3u, slice: u32) {
   // Integer bounds check: WGSL may assume no NaN, so never rely on float comparisons to reject NaN.
   let ix = i32(floor((r.x - P.center.x) * P.pxPerUnit + f32(P.width) * 0.5));
   let iy = i32(floor(f32(P.height) * 0.5 - (r.y - P.center.y) * P.pxPerUnit));
   if (ix < 0 || iy < 0 || ix >= i32(P.width) || iy >= i32(P.height)) { return; }
-  let idx = (u32(iy) * P.width + u32(ix)) * 4u;
+  let idx = slice + (u32(iy) * P.width + u32(ix)) * 4u;
   atomicAdd(&hist[idx], 1u);
   // Colour sums are always accumulated (measured: no cost), so switching colour mode never needs a recompute.
   atomicAdd(&hist[idx + 1u], rgb.x);
@@ -147,8 +194,40 @@ fn splat(@builtin(global_invocation_id) gid: vec3u) {
   let lh = loadPoly(tid);
   if (!solve(lh.x, lh.y)) { atomicAdd(&stats[0], 1u); }
   let rgb = vec3u(hue2rgb(hue) * 63.0 + 0.5);  // 6-bit so a pixel can take 68M roots before u32 overflow
-  for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), rgb); }
-  for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], rgb); }
+  for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), rgb, 0u); }
+  for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], rgb, 0u); }
+}
+
+// Animation: one thread follows its polynomial through P.frames frames (frame f uses coeffs[f*k ..] and histogram
+// slice f). Consecutive frames move the roots only a little, so the previous frame's roots are a much better start
+// than the circle: measured 6.4 -> 2.3-2.7 Aberth sweeps per polynomial-frame, 2.2-2.6x faster at 1080p (Fb = 8).
+@compute @workgroup_size(WG)
+fn splatFrames(@builtin(global_invocation_id) gid: vec3u) {
+  let tid = gid.x + gid.y * P.strideX;
+  if (tid >= P.count) { return; }
+  decodeDigits(tid);
+  let rgb = vec3u(hue2rgb(hue) * 63.0 + 0.5);
+  var prev = vec2u(MAX_DEG + 1u);   // no previous frame: the first one starts cold
+  for (var f = 0u; f < P.frames; f++) {
+    let lh = loadFrame(f);
+    var ok = true;
+    if (lh.y > lh.x) {
+      // Warm only if the trimmed shape is unchanged: otherwise z holds a different number of roots.
+      let warm = all(lh == prev);
+      if (!warm) { coldStart(lh.x, lh.y); }
+      ok = polish(lh.x, lh.y);
+      // A warm start can sit next to the wrong root cluster after a big step; the circle start is the robust one.
+      if (!ok && warm) {
+        coldStart(lh.x, lh.y);
+        ok = polish(lh.x, lh.y);
+      }
+    }
+    prev = lh;
+    if (!ok) { atomicAdd(&stats[0], 1u); }
+    let slice = f * P.width * P.height * 4u;
+    for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), rgb, slice); }
+    for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], rgb, slice); }
+  }
 }
 
 @compute @workgroup_size(WG)

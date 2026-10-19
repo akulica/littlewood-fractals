@@ -4,7 +4,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color:
 .handle { position: absolute; width: 18px; height: 18px; margin: -11px 0 0 -11px; border: 2px solid #fff; border-radius: 50%;
           pointer-events: auto; cursor: move; touch-action: none; box-shadow: 0 0 4px #000; }
 #panel { position: fixed; top: 8px; left: 8px; display: grid; gap: 6px; padding: 10px; max-width: 290px;
-         background: rgba(10, 10, 20, 0.8); border-radius: 8px; }
+         max-height: calc(100vh - 36px); overflow-y: auto; background: rgba(10, 10, 20, 0.8); border-radius: 8px; }
 #panel label { display: grid; grid-template-columns: 90px 1fr; align-items: center; gap: 6px; }
 #panel .row { display: flex; gap: 6px; }
 #coeffs.invalid { outline: 2px solid #e44; }
@@ -14,3 +14,19 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color:
 #panel .export input { width: 70px; }
 #exportStatus { color: #9cf; }
 #exportStatus.error { color: #f88; }
+#anim summary { cursor: pointer; font-weight: 600; }
+#anim > :not(summary) { margin-top: 6px; }
+#anim > input, #anim > output { display: block; }
+#anim .check { display: flex; gap: 4px; }
+#keyCount { font-weight: normal; color: #aaa; }
+#keyList { margin: 0; padding-left: 22px; max-height: 110px; overflow-y: auto; }
+#keyList li { cursor: pointer; }
+#keyList li span { display: inline-block; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+#keyList button { margin-left: 4px; padding: 0 5px; }
+#keyList:empty { display: none; }
+#timeline { width: 100%; }
+#animStatus { white-space: pre-line; color: #9cf; font-variant-numeric: tabular-nums; }
+#animStatus.error { color: #f88; }
+#keyPaths { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
+#keyPaths .path { fill: none; stroke: rgba(255, 255, 255, 0.45); stroke-width: 1; stroke-dasharray: 4 3; }
+#keyPaths .ghost { fill: none; stroke: rgba(255, 255, 255, 0.55); stroke-width: 1.5; }

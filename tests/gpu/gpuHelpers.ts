@@ -37,6 +37,19 @@ export async function runToEnd(device: GPUDevice, engine: Engine, budget: number
   await device.queue.onSubmittedWorkDone();
 }
 
+/** Copy of the first `bytes` of a COPY_SRC buffer. */
+export async function readBuffer(device: GPUDevice, src: GPUBuffer, bytes: number): Promise<ArrayBuffer> {
+  const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const enc = device.createCommandEncoder();
+  enc.copyBufferToBuffer(src, 0, rb, 0, bytes);
+  device.queue.submit([enc.finish()]);
+  await rb.mapAsync(GPUMapMode.READ);
+  const copy = rb.getMappedRange().slice(0);
+  rb.unmap();
+  rb.destroy();
+  return copy;
+}
+
 /** Total root count in a histogram read back with Engine.readHistogram (4 u32 per pixel, count first). */
 export function countSum(h: Uint32Array): number {
   let s = 0;

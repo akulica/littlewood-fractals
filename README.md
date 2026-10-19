@@ -8,7 +8,7 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 
 - **Node.js 20+** (for the dev server, build and tests).
 - **A WebGPU browser** to use the app (see *Browser support*). It must be opened via `localhost` or `https://`, because WebGPU is disabled on plain `http://` from other hosts.
-- **A real GPU for `npm test`:** the GPU tests run the WGSL kernels through Dawn (the `webgpu` npm package, prebuilt for Windows/macOS/Linux x64). On a machine without a usable GPU, only the 7 pure-logic test files pass.
+- **A real GPU for `npm test`:** the GPU tests run the WGSL kernels through Dawn (the `webgpu` npm package, prebuilt for Windows/macOS/Linux x64). On a machine without a usable GPU, only the 8 pure-logic test files pass.
 - **Windows PowerShell:** if `npm` fails with *"running scripts is disabled on this system"*, either use `npm.cmd` (e.g. `npm.cmd run dev`) or run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
 ## Run
@@ -16,7 +16,7 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 ```bash
 npm install
 npm run dev       # http://localhost:5173  (WebGPU needs https:// or localhost)
-npm test          # 75 tests: pure logic + real-GPU tests via Dawn (no browser needed)
+npm test          # 99 tests: pure logic + real-GPU tests via Dawn (no browser needed)
 npm run bench     # throughput + kernel-variant benchmark on this machine's GPU
 npm run build     # static site in dist/
 ```
@@ -34,6 +34,10 @@ npm run build     # static site in dist/
 | Colour | Hue by low-order coefficients (Egan's palette idea), or inferno density. Exposure and gamma apply instantly, without recomputing. |
 | Kernel | **auto** (default) times both GPU kernels at startup and keeps the faster one. The choice and the measured ratio are shown in the status line. You can also force either kernel. |
 | Save PNG | Type the width × height, then **Save PNG**. The image is re-rendered at that size (never upscaled), shows everything currently on screen (extra margin if the aspect differs), and matches the screen's brightness. Up to 64 M pixels (e.g. 8192×8192 or 16384×4096) within the GPU's limits. Live rendering pauses while it exports. |
+| Animation keyframes | Open **Animation**. Set the coefficients, **Add keyframe**, move them, add the next one; any number of keyframes (at least 2). Each coefficient moves in a straight line from keyframe to keyframe, with equal time per segment. Ghost rings and dashed lines on the picture show the keyframes and the paths. Click a keyframe to jump to it, × to remove it, **Clear** to start over. Changing the number of coefficients clears the keyframes. |
+| Timeline | Drag the slider to scrub: the live view shows that moment (as a sampled preview, like dragging a handle). **▶ Preview** plays the frames the render will use, at the chosen FPS, looping. |
+| Animation settings | **Loop back to start** adds the first keyframe at the end and drops the duplicate last frame, so the video loops seamlessly. **Frames**, **FPS**. **Easing**: smooth (slow start and end) or linear. **Brightness**: locked to the first frame (default) or per frame. **Quality**: 100 % for the final video; 50/25/10 % drafts render only that share of the polynomials per frame (an even sample, so the draft is noisier but otherwise the same picture). |
+| Render animation | Size comes from the Save PNG W × H. **Output**: MP4 (H.264), MP4 + PNG frames, or PNG frames (`frame_00000.png`…; folder outputs need Chrome/Edge). You choose the file or folder first, then every frame is rendered at full size and written as it is finished. The status shows progress, ms/frame and the time left; **Cancel** stops it. Live rendering pauses meanwhile. |
 
 ## Browser support
 
@@ -85,6 +89,30 @@ Since the winner depends on the GPU, both kernels ship. At startup `Engine.calib
 4. `src/core/png.ts` encodes the PNG: 8-bit RGB, deflate via `CompressionStream`, no canvas, so no browser canvas-size cap.
 
 Root counts are multiplied by (export px ÷ screen px)² before tone-mapping, so a 4K export is as bright as the screen.
+
+## Animation
+
+- **One full render per frame.** Every frame is computed from scratch at its own coefficients. Nothing is interpolated between frames, because roots don't move in straight lines.
+- **Warm start.** Consecutive frames move the roots only a little, so the previous frame's roots are a much better starting guess than the usual circle. `roots.wgsl`'s `splatFrames` kernel gives each GPU thread one polynomial for a batch of up to 8 frames: it solves frame 1, then starts frame 2 from those roots, and so on. If a warm start fails to converge, it retries from the circle.
+  - Aberth sweeps drop from 6.4 to 2.3–2.7 per polynomial and frame. The 4 histogram atomics per root and the per-frame readback remain, so the end-to-end gain is smaller. Measured by `tests/gpu/animation.perf.ts`: 1920×1080, 16 frames, coefficient −1 → −0.4+0.75i, `renderAnimation` (including tone-map and RGBA readback) vs. every frame rendered from scratch:
+
+    | GPU | Degree | From scratch | Animation | Speedup |
+    |---|---|---|---|---|
+    | RX 9060 XT | 22 | 470 ms/frame | **241 ms/frame** | **1.95×** |
+    | RX 9060 XT | 20 | 83 ms/frame | 66 ms/frame | 1.25× (short frames: the fixed per-frame readback dominates) |
+    | Arc 140T | 22 | 2131 ms/frame | **780 ms/frame** | **2.73×** |
+    | Arc 140T | 20 | 337 ms/frame | 173 ms/frame | 1.95× |
+
+    So 300 frames (10 s at 30 fps) at degree 22 take about 1.2 min on the PC and 3.9 min on the laptop.
+  - Compared with cold renders: 0 unconverged, the same root counts, and 0.05–0.1 % of roots land one pixel over (f32 edge noise).
+- **Batch size.** 8 frames per batch was fastest on both GPUs (4 and 16 are slower: bigger batches lose histogram cache locality). A batch keeps one histogram per frame on the GPU, capped at 512 MB, so 4K renders use batches of 4 frames.
+- **Locked brightness.** Without it the video pulses: the densest pixel changes 1.3–1.5× between adjacent frames, up and down. By default every frame is therefore tone-mapped against frame 0's densest pixel. Per-frame normalisation is still available.
+- **Same look as the screen.** The animation uses the current view, colour, exposure and gamma, and the same brightness scaling as Save PNG.
+- **Symmetry pinning** is decided once per animation: only if every frame allows it. Otherwise root multiplicity, and with it brightness, would jump between frames.
+- **Outputs.**
+  - MP4: H.264 via the browser's WebCodecs encoder, muxed by [mediabunny](https://mediabunny.dev) at about 0.25 bit per pixel per frame (1080p30 ≈ 15.6 Mbit/s). The size is checked up front: H.264 needs even width and height, and hardware encoders often stop around 4096 px.
+  - Where the browser can write files (Chrome/Edge), the MP4 streams straight to the chosen file, so long videos never sit in memory. Elsewhere it is built in memory and downloaded.
+  - PNG frames are written into the chosen folder as each frame finishes.
 
 ## How it works
 

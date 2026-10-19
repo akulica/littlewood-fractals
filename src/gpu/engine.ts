@@ -1,6 +1,7 @@
 import rootsSrc from './roots.wgsl?raw';
 import coopSrc from './coop.wgsl?raw';
 import displaySrc from './display.wgsl?raw';
+import { MAX_BATCH_FRAMES } from '../core/animation';
 import type { Complex } from '../core/complex';
 import { goldenStride, indexToDigits, leadingFixable, sampleIndex, totalPolys } from '../core/enumeration';
 import { chooseKernel, coopGrid, dispatchGrid, nextBudget, type Kernel } from '../core/schedule';
@@ -9,7 +10,7 @@ import type { View } from '../core/view';
 export const MAX_DEGREE = 32; // = MAX_DEG in roots.wgsl
 export const MAX_COEFFS = 16;
 const TOL = 1e-5; // backward-error stop (measured: 1e-6..3e-5 all converge; 1e-5 is fastest without visible change)
-const PARAMS_BYTES = 48;
+const PARAMS_BYTES = 64;
 const STEP_OFFSET = MAX_DEGREE + 1; // = STEP in the shaders: the stride's digits follow the start digits
 const VIEW_BYTES = 32;
 const REDUCE_GROUPS = 256;
@@ -41,6 +42,18 @@ export interface DisplayParams {
   /** Multiplies root counts before tone-mapping (default 1). An export at k times the screen's pixels per unit
    * gets about k^2 fewer roots per pixel; countScale = k^2 makes it look like the screen. */
   countScale?: number;
+  /** > 0: tone-map against this root count instead of the frame's densest pixel (animation: locked brightness). */
+  fixedMax?: number;
+}
+
+/** One splatFrames batch: up to MAX_BATCH_FRAMES coefficient sets of equal size k, solved per polynomial in turn. */
+export interface FramesParams {
+  frames: Complex[][];
+  degree: number;
+  view: View;
+  maxIter: number;
+  /** Pin the leading digit in every frame (core/animation pinnable(): decided once for the whole animation). */
+  pinned: boolean;
 }
 
 /**
@@ -59,6 +72,8 @@ export class Engine {
   private readonly splatPipe: GPUComputePipeline;
   private readonly coopPipe: GPUComputePipeline;
   private readonly debugPipe: GPUComputePipeline;
+  private readonly rootsModule: GPUShaderModule;
+  private framesPipe: GPUComputePipeline | null = null; // built on first use: exports and the live view never need it
   private readonly reducePipe: GPUComputePipeline;
   private readonly renderPipe: GPURenderPipeline;
   private readonly paramsBuf: GPUBuffer;
@@ -73,6 +88,9 @@ export class Engine {
   private reduceBG: GPUBindGroup | null = null;
   private renderBG: GPUBindGroup | null = null;
   private params: FractalParams | null = null;
+  private frameCount = 0; // > 0: batch mode (setFrames), encodeCompute dispatches splatFrames into framesTarget
+  private framesTarget: GPUBuffer | null = null;
+  private framesBG: GPUBindGroup | null = null;
   private total = 0n;
   private freeDigits = 0;
   private next = 0n;
@@ -81,6 +99,7 @@ export class Engine {
   constructor(device: GPUDevice, format: GPUTextureFormat) {
     this.device = device;
     const roots = device.createShaderModule({ label: 'roots', code: rootsSrc });
+    this.rootsModule = roots;
     const display = device.createShaderModule({ label: 'display', code: displaySrc });
     this.splatPipe = device.createComputePipeline({ layout: 'auto', compute: { module: roots, entryPoint: 'splat' } });
     this.debugPipe = device.createComputePipeline({ layout: 'auto', compute: { module: roots, entryPoint: 'debugRoots' } });
@@ -95,11 +114,11 @@ export class Engine {
     });
     const U = GPUBufferUsage;
     this.paramsBuf = device.createBuffer({ size: PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
-    this.coeffBuf = device.createBuffer({ size: MAX_COEFFS * 8, usage: U.STORAGE | U.COPY_DST });
+    this.coeffBuf = device.createBuffer({ size: MAX_COEFFS * MAX_BATCH_FRAMES * 8, usage: U.STORAGE | U.COPY_DST });
     this.digitsBuf = device.createBuffer({ size: 2 * STEP_OFFSET * 4, usage: U.STORAGE | U.COPY_DST });
     this.statsBuf = device.createBuffer({ size: 16, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
     this.viewBuf = device.createBuffer({ size: VIEW_BYTES, usage: U.UNIFORM | U.COPY_DST });
-    this.maxBuf = device.createBuffer({ size: 16, usage: U.STORAGE | U.COPY_DST });
+    this.maxBuf = device.createBuffer({ size: 16, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
   }
 
   /** Degree currently being accumulated. */
@@ -135,6 +154,12 @@ export class Engine {
     this.coopBG = bind(this.coopPipe, splatBuffers);
     this.reduceBG = bind(this.reducePipe, { 0: this.viewBuf, 1: this.hist, 2: this.maxBuf });
     this.renderBG = bind(this.renderPipe, { 0: this.viewBuf, 1: this.hist, 3: this.maxBuf });
+    if (this.frameCount > 0) {
+      // The batch's W x H slices no longer match: setFrames() again before the next encodeCompute.
+      this.leaveFrames();
+      this.params = null;
+      this.total = 0n;
+    }
     this.next = 0n;
     this.needsClear = true;
   }
@@ -145,6 +170,7 @@ export class Engine {
       throw new RangeError(`degree must be an integer in 1..${MAX_DEGREE}`);
     }
     if (p.coeffs.length < 1 || p.coeffs.length > MAX_COEFFS) throw new RangeError(`need 1..${MAX_COEFFS} coefficients`);
+    this.leaveFrames();
     this.params = p;
     const fixable = leadingFixable(p.coeffs);
     this.total = totalPolys(p.coeffs.length, p.degree, fixable);
@@ -152,6 +178,33 @@ export class Engine {
     this.next = 0n;
     this.needsClear = true;
     this.device.queue.writeBuffer(this.coeffBuf, 0, new Float32Array(p.coeffs.flatMap((c) => [c.re, c.im])));
+  }
+
+  /**
+   * Batch mode for animation: frame f of `p.frames` accumulates into bytes [f, f+1) * W*H*16 of `target`
+   * (STORAGE | COPY_DST usage, at least frames * W*H*16 bytes) through the warm-starting splatFrames kernel; the
+   * engine's own histogram is untouched (loadHistogram() copies a slice into it for display). Restarts accumulation;
+   * every encodeCompute chunk then covers the same polynomials in all frames. Stays in effect until setParams() or
+   * resize().
+   */
+  setFrames(p: FramesParams, target: GPUBuffer): void {
+    const n = p.frames.length;
+    if (n < 1 || n > MAX_BATCH_FRAMES) throw new RangeError(`a batch holds 1..${MAX_BATCH_FRAMES} frames`);
+    const k = p.frames[0].length;
+    if (p.frames.some((f) => f.length !== k)) throw new RangeError('every frame needs the same number of coefficients');
+    if (!this.hist) throw new Error('call resize() before setFrames()');
+    if (target.size < n * this.width * this.height * 16) throw new RangeError(`target holds fewer than ${n} frames of ${this.width}x${this.height}`);
+    this.setParams({ coeffs: p.frames[0], degree: p.degree, view: p.view, maxIter: p.maxIter }); // validates degree and k
+    this.total = totalPolys(k, p.degree, p.pinned);
+    this.freeDigits = p.pinned ? p.degree : p.degree + 1;
+    this.device.queue.writeBuffer(this.coeffBuf, 0, new Float32Array(p.frames.flatMap((f) => f.flatMap((c) => [c.re, c.im]))));
+    this.framesPipe ??= this.device.createComputePipeline({ layout: 'auto', compute: { module: this.rootsModule, entryPoint: 'splatFrames' } });
+    this.frameCount = n;
+    this.framesTarget = target;
+    this.framesBG = this.device.createBindGroup({
+      layout: this.framesPipe.getBindGroupLayout(0),
+      entries: [this.paramsBuf, this.coeffBuf, this.digitsBuf, target, this.statsBuf].map((buffer, binding) => ({ binding, resource: { buffer } })),
+    });
   }
 
   /** Encodes the next chunk (<= budget polynomials) as ONE dispatch. Returns how many polynomials it covers. */
@@ -164,7 +217,8 @@ export class Engine {
     // MAX_BUDGET (2^22) keeps it far below 2^32 for k <= 16; checked before encoding anything.
     if (2 * (k - 1) * count >= 2 ** 32) throw new RangeError(`chunk of ${count} polynomials overflows the u32 digit arithmetic`);
     if (this.needsClear) {
-      enc.clearBuffer(this.hist);
+      if (this.framesTarget) enc.clearBuffer(this.framesTarget, 0, this.frameCount * this.width * this.height * 16);
+      else enc.clearBuffer(this.hist);
       enc.clearBuffer(this.statsBuf);
       this.needsClear = false;
     }
@@ -172,7 +226,14 @@ export class Engine {
     const stride = this.ordering === 'golden' ? goldenStride(this.total, k) : 1n;
     this.writeDigits(sampleIndex(this.next, stride, this.total), stride);
     const pass = enc.beginComputePass();
-    if (this.kernel === 'coop') {
+    if (this.framesBG) {
+      // perPoly only: a thread keeps its roots in registers from frame to frame (coop has no warm path, see plan).
+      const grid = dispatchGrid(count);
+      this.writeParams(count, grid.strideX);
+      pass.setPipeline(this.framesPipe!);
+      pass.setBindGroup(0, this.framesBG);
+      pass.dispatchWorkgroups(grid.x, grid.y);
+    } else if (this.kernel === 'coop') {
       const grid = coopGrid(count, this.params.degree);
       this.writeParams(count, 0); // coop.wgsl derives the index from num_workgroups
       pass.setPipeline(this.coopPipe);
@@ -226,7 +287,7 @@ export class Engine {
     if (!this.reduceBG || !this.renderBG) return;
     const ab = new ArrayBuffer(VIEW_BYTES);
     new Uint32Array(ab).set([this.width, this.height, d.colorMode, 0]);
-    new Float32Array(ab).set([d.exposure, d.gamma, d.countScale ?? 1], 4);
+    new Float32Array(ab).set([d.exposure, d.gamma, d.countScale ?? 1, d.fixedMax ?? 0], 4);
     this.device.queue.writeBuffer(this.viewBuf, 0, ab);
     enc.clearBuffer(this.maxBuf);
     const c = enc.beginComputePass();
@@ -241,6 +302,22 @@ export class Engine {
     r.setBindGroup(0, this.renderBG);
     r.draw(3);
     r.end();
+  }
+
+  /**
+   * Copies one W x H histogram (e.g. a frame slice of a setFrames target; byteOffset a multiple of 4) into the
+   * engine's own histogram, so encodeDisplay shows it. A copy rather than a bind-group offset, which would need
+   * 256-byte alignment and a bind group per frame.
+   */
+  loadHistogram(enc: GPUCommandEncoder, src: GPUBuffer, byteOffset: number): void {
+    if (!this.hist) throw new Error('call resize() before loadHistogram()');
+    enc.copyBufferToBuffer(src, byteOffset, this.hist, 0, this.width * this.height * 16);
+    if (this.frameCount === 0) this.needsClear = false; // the copy is the content now; a pending clear would wipe it
+  }
+
+  /** Densest pixel's root count from the last encodeDisplay (which must have been submitted). */
+  async readMaxCount(): Promise<number> {
+    return new Uint32Array(await this.readBuffer(this.maxBuf, 4))[0];
   }
 
   /** Test/debug: roots of polynomials first .. first+count-1 (lexicographic, wrapping mod N); `degree` vec2f slots each. Resets accumulation. */
@@ -292,6 +369,7 @@ export class Engine {
     const ab = new ArrayBuffer(PARAMS_BYTES);
     new Uint32Array(ab).set([p.degree, p.coeffs.length, count, strideX, this.width, this.height, p.maxIter, this.freeDigits]);
     new Float32Array(ab).set([p.view.cx, p.view.cy, p.view.pxPerUnit, TOL], 8);
+    new Uint32Array(ab).set([Math.max(this.frameCount, 1)], 12);
     this.device.queue.writeBuffer(this.paramsBuf, 0, ab);
   }
 
@@ -302,6 +380,12 @@ export class Engine {
     d.set(indexToDigits(first, p.coeffs.length, p.degree));
     d.set(indexToDigits(stride, p.coeffs.length, p.degree), STEP_OFFSET);
     this.device.queue.writeBuffer(this.digitsBuf, 0, d);
+  }
+
+  private leaveFrames(): void {
+    this.frameCount = 0;
+    this.framesTarget = null;
+    this.framesBG = null;
   }
 
   private async readBuffer(src: GPUBuffer, bytes: number, enc = this.device.createCommandEncoder()): Promise<ArrayBuffer> {
@@ -335,12 +419,10 @@ export async function renderImage(
   device: GPUDevice,
   req: ImageRequest,
   onProgress?: (done: bigint, total: bigint) => void,
-): Promise<Uint8ClampedArray> {
+): Promise<Uint8ClampedArray<ArrayBuffer>> {
   const { width, height } = req;
   const engine = new Engine(device, 'rgba8unorm');
-  const tex = device.createTexture({ size: [width, height], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
-  const bytesPerRow = Math.ceil((width * 4) / 256) * 256; // copyTextureToBuffer requires 256-byte rows
-  const readback = device.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const out = new RgbaReadback(device, width, height);
   try {
     engine.kernel = req.kernel;
     engine.resize(width, height);
@@ -357,18 +439,46 @@ export async function renderImage(
       onProgress?.(engine.progress.done, engine.progress.total);
     }
     const enc = device.createCommandEncoder();
-    engine.encodeDisplay(enc, tex.createView(), req.display);
-    enc.copyTextureToBuffer({ texture: tex }, { buffer: readback, bytesPerRow }, [width, height]);
-    device.queue.submit([enc.finish()]);
-    await readback.mapAsync(GPUMapMode.READ);
-    const src = new Uint8Array(readback.getMappedRange());
+    engine.encodeDisplay(enc, out.view, req.display);
+    return await out.read(enc);
+  } finally {
+    out.destroy();
+    engine.destroy();
+  }
+}
+
+/** Off-screen rgba8unorm target plus its readback buffer (exports and animation frames). */
+export class RgbaReadback {
+  readonly view: GPUTextureView;
+  private readonly device: GPUDevice;
+  private readonly texture: GPUTexture;
+  private readonly buffer: GPUBuffer;
+  private readonly bytesPerRow: number;
+
+  constructor(device: GPUDevice, readonly width: number, readonly height: number) {
+    this.device = device;
+    this.texture = device.createTexture({ size: [width, height], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    this.view = this.texture.createView();
+    this.bytesPerRow = Math.ceil((width * 4) / 256) * 256; // copyTextureToBuffer requires 256-byte rows
+    this.buffer = device.createBuffer({ size: this.bytesPerRow * height, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  }
+
+  /** Appends the texture copy to `enc` (which should have drawn into `view`), submits it and returns tightly
+   * packed RGBA, row padding removed. */
+  async read(enc: GPUCommandEncoder): Promise<Uint8ClampedArray<ArrayBuffer>> {
+    const { width, height, bytesPerRow } = this;
+    enc.copyTextureToBuffer({ texture: this.texture }, { buffer: this.buffer, bytesPerRow }, [width, height]);
+    this.device.queue.submit([enc.finish()]);
+    await this.buffer.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(this.buffer.getMappedRange());
     const out = new Uint8ClampedArray(width * height * 4);
     for (let y = 0; y < height; y++) out.set(src.subarray(y * bytesPerRow, y * bytesPerRow + width * 4), y * width * 4);
-    readback.unmap();
+    this.buffer.unmap();
     return out;
-  } finally {
-    readback.destroy();
-    tex.destroy();
-    engine.destroy();
+  }
+
+  destroy(): void {
+    this.buffer.destroy();
+    this.texture.destroy();
   }
 }

@@ -15,6 +15,10 @@ struct Params {
   center: vec2f,    // complex value at the canvas centre
   pxPerUnit: f32,   // pixels per unit of the complex plane
   tol: f32,
+  frames: u32,      // roots.wgsl splatFrames only
+  _pad0: u32,       // 64 bytes, same layout as roots.wgsl
+  _pad1: u32,
+  _pad2: u32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
