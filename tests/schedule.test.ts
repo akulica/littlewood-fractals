@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chooseKernel, coopGrid, dispatchGrid, nextBudget, previewDegree } from '../src/core/schedule';
+import { chooseKernel, coopGrid, dispatchGrid, nextBudget } from '../src/core/schedule';
 
 describe('dispatchGrid', () => {
   it('uses one row when it fits', () => {
@@ -23,15 +23,6 @@ describe('nextBudget', () => {
   it('clamps to [1024, 4M]', () => {
     expect(nextBudget(1024, 1000, 12)).toBe(1024);
     expect(nextBudget(1 << 22, 0.01, 12)).toBe(1 << 22);
-  });
-});
-
-describe('previewDegree', () => {
-  it('picks the largest degree whose polynomial count fits the budget', () => {
-    expect(previewDegree(2, 24, true, 70_000)).toBe(16);
-    expect(previewDegree(3, 10, false, 1000)).toBe(5);
-    expect(previewDegree(2, 5, true, 1e6)).toBe(5);
-    expect(previewDegree(16, 30, false, 10)).toBe(1);
   });
 });
 

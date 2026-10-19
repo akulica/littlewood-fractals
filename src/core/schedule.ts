@@ -1,5 +1,3 @@
-import { totalPolys } from './enumeration';
-
 export const WORKGROUP = 64; // must equal WG in roots.wgsl
 export const COOP_WORKGROUP = 256; // must equal WGS in coop.wgsl
 export const MAX_WG_PER_DIM = 65535;
@@ -18,13 +16,6 @@ export function dispatchGrid(count: number): { x: number; y: number; strideX: nu
 export function nextBudget(budget: number, elapsedMs: number, targetMs: number): number {
   const f = Math.min(2, Math.max(0.5, targetMs / Math.max(elapsedMs, 0.1)));
   return Math.round(Math.min(MAX_BUDGET, Math.max(MIN_BUDGET, budget * f)));
-}
-
-/** Highest degree <= `degree` (but >= 1) whose whole polynomial set fits in one frame's budget. */
-export function previewDegree(k: number, degree: number, fixable: boolean, budget: number): number {
-  let d = degree;
-  while (d > 1 && totalPolys(k, d, fixable) > BigInt(Math.floor(budget))) d--;
-  return d;
 }
 
 export type Kernel = 'perPoly' | 'coop';

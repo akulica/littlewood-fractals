@@ -12,7 +12,7 @@ struct Params {
   width: u32,       // histogram width in pixels
   height: u32,      // histogram height in pixels
   maxIter: u32,     // Aberth sweeps cap
-  _pad0: u32,
+  freeDigits: u32,  // D: digits that vary (d when the leading digit is pinned, else d+1); N = k^D
   center: vec2f,    // complex value at the canvas centre
   pxPerUnit: f32,   // pixels per unit of the complex plane
   tol: f32,         // backward-error stop: |p(z)| <= tol * sum|a_i||z|^i  (engine uses 1e-5)
@@ -20,7 +20,8 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;      // k coefficient values
-@group(0) @binding(2) var<storage, read> baseDigits: array<u32>;    // d+1 base-k digits of this dispatch's first index; digit i picks a_i
+// Base-k digits (little-endian, digit i picks a_i): [0..=32] = this dispatch's first index, [33..=65] = stride G.
+@group(0) @binding(2) var<storage, read> digits: array<u32>;
 @group(0) @binding(3) var<storage, read_write> hist: array<atomic<u32>>;  // 4 u32 per pixel: count, r, g, b
 @group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>; // [0] = unconverged polynomials
 @group(0) @binding(5) var<storage, read_write> outRoots: array<vec2f>;    // debugRoots only: degree slots per polynomial
@@ -41,17 +42,24 @@ fn finite2(v: vec2f) -> bool {
   return all(e != vec2u(0x7f800000u));
 }
 
-// Fills a[0..=degree] for polynomial number (base + tid). Returns (lo, hi):
+const STEP: u32 = MAX_DEG + 1u;  // offset of the stride's digits in `digits`
+
+// Fills a[0..=degree] for polynomial number (first + tid * G) mod k^D, digit by digit with carry. Every digit
+// value stays below 2 (k-1) count < 2^32 (Engine asserts it). The carry out of digit D-1 is dropped, which is
+// exactly the mod N; digits >= D (the pinned leading one) are 0. Returns (lo, hi):
 // lo = number of zero low coefficients (roots at 0), hi = effective degree after trimming zero leading coefficients.
 fn loadPoly(tid: u32) -> vec2u {
   let k = P.numCoeffs;
-  var carry = tid;
+  var carry = 0u;
   var w = 1.0;
   hue = 0.0;
   for (var i = 0u; i <= P.degree; i++) {
-    let s = baseDigits[i] + carry % k;
-    carry = carry / k + s / k;
-    let dg = s % k;
+    var dg = 0u;
+    if (i < P.freeDigits) {
+      let v = digits[i] + digits[STEP + i] * tid + carry;
+      dg = v % k;
+      carry = v / k;
+    }
     a[i] = coeffs[dg];
     w = w / f32(k);
     hue += f32(dg) * w;     // low-order terms dominate the hue (Egan's palette idea)

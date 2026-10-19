@@ -43,3 +43,32 @@ export function countSum(h: Uint32Array): number {
   for (let i = 0; i < h.length; i += 4) s += h[i];
   return s;
 }
+
+/** Index of the first differing element, or -1 when equal (toEqual is ~1 s per 256x256 histogram). */
+export function firstDifference(a: Uint32Array, b: Uint32Array): number {
+  if (a.length !== b.length) return Math.min(a.length, b.length);
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return i;
+  return -1;
+}
+
+/** L1 distance between two histograms' densities (each normalised to sum 1), summed over b x b pixel blocks.
+ * 0 = identical, 2 = disjoint. */
+export function blockL1(p: Uint32Array, q: Uint32Array, w: number, h: number, b: number): number {
+  const sp = countSum(p);
+  const sq = countSum(q);
+  let d = 0;
+  for (let by = 0; by < h; by += b) {
+    for (let bx = 0; bx < w; bx += b) {
+      let x = 0;
+      let y = 0;
+      for (let yy = by; yy < Math.min(by + b, h); yy++) {
+        for (let xx = bx; xx < Math.min(bx + b, w); xx++) {
+          x += p[(yy * w + xx) * 4];
+          y += q[(yy * w + xx) * 4];
+        }
+      }
+      d += Math.abs(x / sp - y / sq);
+    }
+  }
+  return d;
+}

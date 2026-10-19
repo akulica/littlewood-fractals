@@ -1,9 +1,8 @@
 import './style.css';
 import { formatComplex, parseCoefficientList, type Complex } from '../core/complex';
 import { exportSizeError, exportView } from '../core/export';
-import { leadingFixable } from '../core/enumeration';
 import { encodePng } from '../core/png';
-import { nextBudget, previewDegree, type Kernel } from '../core/schedule';
+import { nextBudget, type Kernel } from '../core/schedule';
 import { fitView, panBy, pixelToWorld, worldToPixel, zoomAt, type View } from '../core/view';
 import { getDevice } from '../gpu/device';
 import { Engine, MAX_COEFFS, MAX_DEGREE, renderImage, type Calibration, type DisplayParams } from '../gpu/engine';
@@ -33,6 +32,11 @@ function showError(message: string): void {
   box.hidden = false;
 }
 
+// 3.1, 0.25, 0.0012: enough digits to see a deep-degree sample grow.
+const fmtPct = (p: number) => (p >= 0.1 || p === 0 ? p.toFixed(1) : p.toPrecision(2));
+const sameView = (a: View, b: View) => a.cx === b.cx && a.cy === b.cy && a.pxPerUnit === b.pxPerUnit;
+const sameCoeffs = (a: Complex[], b: Complex[]) => a.length === b.length && a.every((c, i) => c.re === b[i].re && c.im === b[i].im);
+
 const fmtTime = (s: number) => (s < 120 ? `${s.toFixed(0)} s` : s < 7200 ? `${(s / 60).toFixed(0)} min` : `${(s / 3600).toFixed(1)} h`);
 
 async function start(): Promise<void> {
@@ -57,6 +61,7 @@ async function start(): Promise<void> {
   let displayDirty = true;
   let rootsPerSec = 0;
   let wheelTimer = 0;
+  let applied: { coeffs: Complex[]; degree: number; view: View } | null = null; // what the engine accumulates
 
   const display = (): DisplayParams => ({
     colorMode: colorSelect.value === '0' ? 0 : 1,
@@ -64,15 +69,20 @@ async function start(): Promise<void> {
     gamma: Number(gammaInput.value),
   });
   const dpr = () => canvas.width / canvas.clientWidth;
-  const effectiveDegree = () => (interacting ? previewDegree(coeffs.length, degree, leadingFixable(coeffs), budget) : degree);
   const eventToPixel = (e: PointerEvent | WheelEvent) => {
     const r = canvas.getBoundingClientRect();
     return { x: (e.clientX - r.left) * dpr(), y: (e.clientY - r.top) * dpr() };
   };
 
-  function restart(): void {
+  // Accumulation restarts only when the picture itself changed. The engine samples polynomials in golden order, so
+  // whatever is on screen when a drag ends is already an even sample of the final picture: keep refining it.
+  function restart(force = false): void {
     if (!view) return;
-    engine.setParams({ coeffs, degree: effectiveDegree(), view, maxIter: MAX_ITER });
+    const same = applied !== null && applied.degree === degree && sameView(applied.view, view) && sameCoeffs(applied.coeffs, coeffs);
+    if (force || !same) {
+      engine.setParams({ coeffs, degree, view, maxIter: MAX_ITER });
+      applied = { coeffs, degree, view };
+    }
     displayDirty = true;
     placeHandles();
   }
@@ -112,8 +122,7 @@ async function start(): Promise<void> {
     });
     const end = (e: PointerEvent) => {
       if (h.hasPointerCapture(e.pointerId)) h.releasePointerCapture(e.pointerId);
-      interacting = false;
-      restart();
+      interacting = false; // pump() continues the same sample to the full set
     };
     h.addEventListener('pointerup', end);
     h.addEventListener('pointercancel', end);
@@ -150,7 +159,6 @@ async function start(): Promise<void> {
     if (!panLast) return;
     panLast = null;
     interacting = false;
-    restart();
   };
   canvas.addEventListener('pointerup', endPan);
   canvas.addEventListener('pointercancel', endPan);
@@ -165,10 +173,7 @@ async function start(): Promise<void> {
       view = zoomAt(view, canvas.width, canvas.height, p.x, p.y, Math.exp(-e.deltaY * 0.0015));
       interacting = true;
       clearTimeout(wheelTimer);
-      wheelTimer = window.setTimeout(() => {
-        interacting = false;
-        restart();
-      }, 200);
+      wheelTimer = window.setTimeout(() => (interacting = false), 200);
       restart();
     },
     { passive: false },
@@ -204,16 +209,17 @@ async function start(): Promise<void> {
   for (const input of [colorSelect, exposureInput, gammaInput]) input.addEventListener('input', () => (displayDirty = true));
   kernelSelect.addEventListener('change', () => {
     engine.kernel = kernelSelect.value === 'auto' ? calibration.kernel : (kernelSelect.value as Kernel);
-    restart();
+    restart(true); // re-render from scratch so the status line times the chosen kernel
   });
 
   function updateStatus(): void {
     const { done, total } = engine.progress;
     const pct = total > 0n ? Number((done * 10000n) / total) / 100 : 100;
     const secondsLeft = (Number(total - done) * engine.degree) / Math.max(rootsPerSec, 1);
+    const sampled = done < total ? ` · preview · ${fmtPct((Number(done) / Number(total)) * 100)} % sampled` : '';
     const kernelNote = kernelSelect.value === 'auto' ? ` (auto: coop/perPoly = ${(calibration.coopMs / calibration.perPolyMs).toFixed(2)})` : '';
     statusOut.textContent =
-      `degree ${engine.degree}${engine.degree < degree ? ' (preview)' : ''} · ${coeffs.length} coefficients\n` +
+      `degree ${engine.degree}${sampled} · ${coeffs.length} coefficients\n` +
       `kernel ${engine.kernel}${kernelNote}\n` +
       `${pct.toFixed(2)} % of ${total.toLocaleString()} polynomials\n` +
       `${(rootsPerSec / 1e6).toFixed(1)} M roots/s` +
@@ -221,8 +227,9 @@ async function start(): Promise<void> {
   }
 
   // ---- interactive: compute + display in one submit per animation frame, at most one frame in flight,
-  // so input never queues behind compute. Idle: pump() keeps the GPU busy with back-to-back chunks and
-  // frame() only redraws (measured: tying idle compute to rAF left the GPU ~75 % idle at degree 24). ----
+  // so input never queues behind compute. Each frame adds the next golden-order slice at full degree, sized by
+  // the adaptive budget, so the preview is a growing even sample of the final picture. Idle: pump() keeps the
+  // GPU busy with back-to-back chunks and frame() only redraws (measured: tying idle compute to rAF left the GPU ~75 % idle at degree 24). ----
   async function pump(): Promise<void> {
     if (pumping) return;
     pumping = true;
@@ -326,7 +333,7 @@ async function start(): Promise<void> {
   kernelSelect.disabled = true; // its listener reads `calibration`, which does not exist until this resolves
   const calibration: Calibration = await engine.calibrate();
   kernelSelect.disabled = false;
-  restart();
+  restart(true); // calibrate() left its own polynomials loaded
   new ResizeObserver(() => sizeCanvas()).observe(canvas);
   requestAnimationFrame(frame);
 }

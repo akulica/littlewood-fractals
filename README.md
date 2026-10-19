@@ -8,7 +8,7 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 
 - **Node.js 20+** (for the dev server, build and tests).
 - **A WebGPU browser** to use the app (see *Browser support*). It must be opened via `localhost` or `https://`, because WebGPU is disabled on plain `http://` from other hosts.
-- **A real GPU for `npm test`:** the GPU tests run the WGSL kernels through Dawn (the `webgpu` npm package, prebuilt for Windows/macOS/Linux x64). On a machine without a usable GPU, only the 5 pure-logic test files pass.
+- **A real GPU for `npm test`:** the GPU tests run the WGSL kernels through Dawn (the `webgpu` npm package, prebuilt for Windows/macOS/Linux x64). On a machine without a usable GPU, only the 7 pure-logic test files pass.
 - **Windows PowerShell:** if `npm` fails with *"running scripts is disabled on this system"*, either use `npm.cmd` (e.g. `npm.cmd run dev`) or run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
 ## Run
@@ -16,7 +16,7 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 ```bash
 npm install
 npm run dev       # http://localhost:5173  (WebGPU needs https:// or localhost)
-npm test          # 63 tests: pure logic + real-GPU tests via Dawn (no browser needed)
+npm test          # 75 tests: pure logic + real-GPU tests via Dawn (no browser needed)
 npm run bench     # throughput + kernel-variant benchmark on this machine's GPU
 npm run build     # static site in dist/
 ```
@@ -27,7 +27,7 @@ npm run build     # static site in dist/
 
 | Action | How |
 |---|---|
-| Move a coefficient | Drag its white ring. While dragging, a lower "preview" degree renders every frame; on release it refines to the full degree. |
+| Move a coefficient | Drag its white ring. While dragging, every frame renders as many full-degree polynomials as fit in ~12 ms, spread evenly over the whole set, so the preview already looks like the final picture (the status line shows `preview · 3.1 % sampled`). On release it keeps refining the same sample to 100 % instead of starting over. |
 | Set coefficients exactly | Type in **Coefficients**, e.g. `1, -1`, `1, i, -1, -i`, `0.5+0.3i, -1` (1–16 values), then press Enter. |
 | Degree | 1–32 |
 | Pan / zoom | Drag the background / mouse wheel (zooms around the cursor) / **Zoom ±** / **Reset view** |
@@ -99,9 +99,14 @@ Root counts are multiplied by (export px ÷ screen px)² before tone-mapping, so
   - Accuracy against an f64 reference: better than 1e-4 for general sets, better than 1e-3 for Littlewood (clustered roots).
 - **No roots stored.** Each root is `atomicAdd`ed into a per-pixel histogram (count + RGB). A reduction finds the densest pixel, and a fragment shader tone-maps with a log curve.
 - **Enumeration.** Polynomial number n is decoded from its base-k digits (digit i picks `a_i`). The CPU sends each chunk's start digits as BigInt, so totals beyond 2⁵³ work.
+- **Enumeration order: golden stride.** Sample m is polynomial m·G mod N, with G ≈ 0.618·N made coprime to k. The shader gets the digits of the chunk start and of G and adds `G·tid` digit by digit with carry.
+  - It is a bijection of [0, N), so the full render is just the continuation of whatever prefix is on screen, with a bit-identical final histogram.
+  - Any prefix is spread evenly over the whole set: a Weyl sequence in the high digits, and every block of k^j samples hits each pattern of the low j digits exactly once.
+  - A small fixed stride ("skip 19, compute one") is biased. With k = 2 a stride of 20 freezes a₀ = a₁ = +1 and shows a different fractal; a coprime small stride still leaves lattice artifacts.
+  - Measured at a 1/16 budget (Littlewood degree 20, 512², L1 distance from the full picture over 8×8 blocks; 0 = identical, 2 = disjoint): the old complete lower-degree preview (degree 16) scores **0.153**, stride 20 scores **0.282**, golden stride **0.017**.
 - **Symmetry pinning.** If the set is `c0·G` for a finite group G (±1, roots of unity, …), every polynomial is a unit multiple of one with leading coefficient `c0`. The leading digit is pinned, giving k× less work.
 - **Scheduling.**
-  - While you interact: one adaptive (~12 ms) chunk per animation frame.
+  - While you interact: one adaptive (~12 ms) chunk per animation frame, at full degree, continuing the golden-order sample.
   - While idle: back-to-back ~40 ms chunks, with redraws on animation frames.
 
 ## Prior art examined

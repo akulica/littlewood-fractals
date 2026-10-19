@@ -11,7 +11,7 @@ struct Params {
   width: u32,       // histogram width in pixels
   height: u32,      // histogram height in pixels
   maxIter: u32,     // Aberth sweeps cap
-  _pad0: u32,
+  freeDigits: u32,  // D: digits that vary (d when the leading digit is pinned, else d+1); N = k^D
   center: vec2f,    // complex value at the canvas centre
   pxPerUnit: f32,   // pixels per unit of the complex plane
   tol: f32,
@@ -19,7 +19,9 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;      // k coefficient values
-@group(0) @binding(2) var<storage, read> baseDigits: array<u32>;    // d+1 base-k digits of this dispatch's first index; digit i picks a_i
+// Base-k digits (little-endian, digit i picks a_i): [0..=32] = this dispatch's first index, [33..=65] = stride G.
+@group(0) @binding(2) var<storage, read> digits: array<u32>;
+const STEP: u32 = 33u;  // offset of the stride's digits in `digits` (= MAX_DEG + 1 in roots.wgsl)
 @group(0) @binding(3) var<storage, read_write> hist: array<atomic<u32>>;  // 4 u32 per pixel: count, r, g, b
 @group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>; // [0] = unconverged ROOTS (per-thread here)
 
@@ -68,11 +70,15 @@ fn splatCoop(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index)
   let abase = slot * (d + 1u);
   let zbase = slot * d;
   if (valid && j == 0u) {
-    var carry = tid; var w = 1.0; var h = 0.0;
+    // Index (first + tid * G) mod k^D, as in roots.wgsl loadPoly.
+    var carry = 0u; var w = 1.0; var h = 0.0;
     for (var i = 0u; i <= d; i++) {
-      let s = baseDigits[i] + carry % k;
-      carry = carry / k + s / k;
-      let dg = s % k;
+      var dg = 0u;
+      if (i < P.freeDigits) {
+        let v = digits[i] + digits[STEP + i] * tid + carry;
+        dg = v % k;
+        carry = v / k;
+      }
       sa[abase + i] = coeffs[dg];
       w = w / f32(k); h += f32(dg) * w;
     }

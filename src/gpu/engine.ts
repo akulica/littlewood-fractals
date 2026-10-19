@@ -2,7 +2,7 @@ import rootsSrc from './roots.wgsl?raw';
 import coopSrc from './coop.wgsl?raw';
 import displaySrc from './display.wgsl?raw';
 import type { Complex } from '../core/complex';
-import { indexToDigits, leadingFixable, totalPolys } from '../core/enumeration';
+import { goldenStride, indexToDigits, leadingFixable, sampleIndex, totalPolys } from '../core/enumeration';
 import { chooseKernel, coopGrid, dispatchGrid, nextBudget, type Kernel } from '../core/schedule';
 import type { View } from '../core/view';
 
@@ -10,11 +10,16 @@ export const MAX_DEGREE = 32; // = MAX_DEG in roots.wgsl
 export const MAX_COEFFS = 16;
 const TOL = 1e-5; // backward-error stop (measured: 1e-6..3e-5 all converge; 1e-5 is fastest without visible change)
 const PARAMS_BYTES = 48;
+const STEP_OFFSET = MAX_DEGREE + 1; // = STEP in the shaders: the stride's digits follow the start digits
 const VIEW_BYTES = 32;
 const REDUCE_GROUPS = 256;
 const CAL_DEGREE = 20; // calibration workload: 2^18 Littlewood polynomials of degree 20 (~15-70 ms per run)
 const CAL_POLYS = 1 << 18;
 const CAL_LW: Complex[] = [{ re: 1, im: 0 }, { re: -1, im: 0 }];
+
+/** golden: sample m is polynomial m*G mod N (G ~ 0.618 N), so every prefix looks like the full picture.
+ * lexicographic: m itself (tests/debugging). Both cover every polynomial exactly once. */
+export type Ordering = 'golden' | 'lexicographic';
 
 export interface Calibration {
   kernel: Kernel;
@@ -49,6 +54,8 @@ export class Engine {
   height = 0;
   /** Which splat kernel encodeCompute dispatches. calibrate() sets it to the faster one for this GPU. */
   kernel: Kernel = 'perPoly';
+  /** Enumeration order of the polynomials; changing it mid-accumulation would skip or repeat some. */
+  ordering: Ordering = 'golden';
   private readonly splatPipe: GPUComputePipeline;
   private readonly coopPipe: GPUComputePipeline;
   private readonly debugPipe: GPUComputePipeline;
@@ -67,6 +74,7 @@ export class Engine {
   private renderBG: GPUBindGroup | null = null;
   private params: FractalParams | null = null;
   private total = 0n;
+  private freeDigits = 0;
   private next = 0n;
   private needsClear = true;
 
@@ -88,13 +96,13 @@ export class Engine {
     const U = GPUBufferUsage;
     this.paramsBuf = device.createBuffer({ size: PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
     this.coeffBuf = device.createBuffer({ size: MAX_COEFFS * 8, usage: U.STORAGE | U.COPY_DST });
-    this.digitsBuf = device.createBuffer({ size: (MAX_DEGREE + 1) * 4, usage: U.STORAGE | U.COPY_DST });
+    this.digitsBuf = device.createBuffer({ size: 2 * STEP_OFFSET * 4, usage: U.STORAGE | U.COPY_DST });
     this.statsBuf = device.createBuffer({ size: 16, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
     this.viewBuf = device.createBuffer({ size: VIEW_BYTES, usage: U.UNIFORM | U.COPY_DST });
     this.maxBuf = device.createBuffer({ size: 16, usage: U.STORAGE | U.COPY_DST });
   }
 
-  /** Degree currently being accumulated (may be a preview degree). */
+  /** Degree currently being accumulated. */
   get degree(): number {
     return this.params?.degree ?? 0;
   }
@@ -138,7 +146,9 @@ export class Engine {
     }
     if (p.coeffs.length < 1 || p.coeffs.length > MAX_COEFFS) throw new RangeError(`need 1..${MAX_COEFFS} coefficients`);
     this.params = p;
-    this.total = totalPolys(p.coeffs.length, p.degree, leadingFixable(p.coeffs));
+    const fixable = leadingFixable(p.coeffs);
+    this.total = totalPolys(p.coeffs.length, p.degree, fixable);
+    this.freeDigits = fixable ? p.degree : p.degree + 1;
     this.next = 0n;
     this.needsClear = true;
     this.device.queue.writeBuffer(this.coeffBuf, 0, new Float32Array(p.coeffs.flatMap((c) => [c.re, c.im])));
@@ -147,15 +157,20 @@ export class Engine {
   /** Encodes the next chunk (<= budget polynomials) as ONE dispatch. Returns how many polynomials it covers. */
   encodeCompute(enc: GPUCommandEncoder, budget: number): number {
     if (!this.params || !this.hist || !this.splatBG || !this.coopBG) return 0;
+    const remaining = this.total - this.next;
+    const count = remaining <= 0n ? 0 : remaining < BigInt(budget) ? Number(remaining) : Math.floor(budget);
+    const k = this.params.coeffs.length;
+    // The shaders build digit i as start_i + G_i * tid + carry in u32; that sum stays below 2 (k-1) count.
+    // MAX_BUDGET (2^22) keeps it far below 2^32 for k <= 16; checked before encoding anything.
+    if (2 * (k - 1) * count >= 2 ** 32) throw new RangeError(`chunk of ${count} polynomials overflows the u32 digit arithmetic`);
     if (this.needsClear) {
       enc.clearBuffer(this.hist);
       enc.clearBuffer(this.statsBuf);
       this.needsClear = false;
     }
-    const remaining = this.total - this.next;
-    if (remaining <= 0n) return 0;
-    const count = remaining < BigInt(budget) ? Number(remaining) : Math.floor(budget);
-    this.device.queue.writeBuffer(this.digitsBuf, 0, indexToDigits(this.next, this.params.coeffs.length, this.params.degree));
+    if (count === 0) return 0;
+    const stride = this.ordering === 'golden' ? goldenStride(this.total, k) : 1n;
+    this.writeDigits(sampleIndex(this.next, stride, this.total), stride);
     const pass = enc.beginComputePass();
     if (this.kernel === 'coop') {
       const grid = coopGrid(count, this.params.degree);
@@ -228,13 +243,13 @@ export class Engine {
     r.end();
   }
 
-  /** Test/debug: roots of `count` polynomials starting at index `first`; `degree` vec2f slots each. Resets accumulation. */
+  /** Test/debug: roots of polynomials first .. first+count-1 (lexicographic, wrapping mod N); `degree` vec2f slots each. Resets accumulation. */
   async solveDebug(coeffs: Complex[], degree: number, first: bigint, count: number): Promise<Float32Array> {
     this.setParams({ coeffs, degree, view: { cx: 0, cy: 0, pxPerUnit: 1 }, maxIter: 32 });
     const bytes = count * degree * 8;
     const out = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     const grid = dispatchGrid(count);
-    this.device.queue.writeBuffer(this.digitsBuf, 0, indexToDigits(first, coeffs.length, degree));
+    this.writeDigits(first, 1n); // lexicographic: polynomial t of the output is index first + t
     this.writeParams(count, grid.strideX);
     const bg = this.device.createBindGroup({
       layout: this.debugPipe.getBindGroupLayout(0),
@@ -275,9 +290,18 @@ export class Engine {
   private writeParams(count: number, strideX: number): void {
     const p = this.params!;
     const ab = new ArrayBuffer(PARAMS_BYTES);
-    new Uint32Array(ab).set([p.degree, p.coeffs.length, count, strideX, this.width, this.height, p.maxIter, 0]);
+    new Uint32Array(ab).set([p.degree, p.coeffs.length, count, strideX, this.width, this.height, p.maxIter, this.freeDigits]);
     new Float32Array(ab).set([p.view.cx, p.view.cy, p.view.pxPerUnit, TOL], 8);
     this.device.queue.writeBuffer(this.paramsBuf, 0, ab);
+  }
+
+  /** One buffer, one write per chunk: the chunk's first index, then the stride G (both as base-k digits). */
+  private writeDigits(first: bigint, stride: bigint): void {
+    const p = this.params!;
+    const d = new Uint32Array(2 * STEP_OFFSET);
+    d.set(indexToDigits(first, p.coeffs.length, p.degree));
+    d.set(indexToDigits(stride, p.coeffs.length, p.degree), STEP_OFFSET);
+    this.device.queue.writeBuffer(this.digitsBuf, 0, d);
   }
 
   private async readBuffer(src: GPUBuffer, bytes: number, enc = this.device.createCommandEncoder()): Promise<ArrayBuffer> {
