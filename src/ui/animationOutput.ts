@@ -4,7 +4,9 @@
 import { BufferTarget, Mp4OutputFormat, Output, Quality, StreamTarget, VideoSample, VideoSampleSource, canEncodeVideo } from 'mediabunny';
 import { videoSizeError } from '../core/animation';
 import { encodePng, type PngText } from '../core/png';
+import { PngPool, defaultPngWorkers } from '../core/pngPool';
 import { mp4Tags } from './mp4Metadata';
+import { spawnWebPngEncoder } from './pngWorker';
 
 export { readMp4Comment } from './mp4Metadata';
 
@@ -80,25 +82,42 @@ export async function openAnimationWriter(o: WriterOptions): Promise<AnimationWr
     await w.close();
   }
   let pngs = 0;
+  const writePng = async (png: Blob | Uint8Array<ArrayBuffer>, index: number) => {
+    const file = await dir!.getFileHandle(`frame_${String(index).padStart(5, '0')}.png`, { create: true });
+    const w = await file.createWritable();
+    await w.write(png);
+    await w.close();
+    pngs++;
+  };
+  // PNG frames are encoded in Web Workers, overlapped with rendering and disk writes; without Workers (or if they
+  // fail to start) the encoding stays on this thread, one frame at a time.
+  let pool: PngPool<number> | null = null;
+  if (dir) {
+    try {
+      pool = new PngPool<number>(spawnWebPngEncoder, defaultPngWorkers(navigator.hardwareConcurrency), (png, index) => writePng(png, index));
+      await pool.check();
+    } catch {
+      pool?.terminate();
+      pool = null;
+    }
+  }
   return {
     async frame(rgba, index, texts) {
       if (video) await video.add(rgba, index);
-      if (dir) {
-        const blob = await encodePng(rgba, o.width, o.height, texts?.());
-        const file = await dir.getFileHandle(`frame_${String(index).padStart(5, '0')}.png`, { create: true });
-        const w = await file.createWritable();
-        await w.write(blob);
-        await w.close();
-        pngs++;
-      }
+      if (!dir) return;
+      // The pool transfers the buffer to a worker: give it a copy while the video encoder may still hold a reference.
+      if (pool) await pool.submit({ rgba: video ? rgba.slice() : rgba, width: o.width, height: o.height, texts: texts?.() ?? [] }, index);
+      else await writePng(await encodePng(rgba, o.width, o.height, texts?.()), index);
     },
     async finish() {
+      await pool?.finish();
       const parts: string[] = [];
       if (video) parts.push(await video.finish());
       if (dir) parts.push(`${pngs} PNG frames in ${dir.name}/`);
       return parts.join(' + ');
     },
     async cancel() {
+      pool?.terminate();
       await video?.cancel();
     },
   };

@@ -7,26 +7,31 @@
 //   npx vite build --ssr scripts/render-headless.ts --outDir scripts/dist
 // Run from the repo (so `webgpu` resolves from node_modules):
 //   node scripts/dist/render-headless.js <settings.json> --out <dir> [--width 3840 --height 2160] [--degree d]
-//     [--png] [--mp4] [--crf 15] [--preset slow] [--kernel auto|perPoly|coop] [--bench N]
+//     [--png] [--png-workers N] [--mp4] [--crf 15] [--preset slow] [--kernel auto|perPoly|coop] [--bench N]
 //   --bench N renders only the first N frames, writes nothing and prints the time per frame.
+//   --png-workers N encodes the PNG frames on N worker threads, overlapped with rendering (default
+//   min(4, max(1, cores - 2))); 0 encodes on the main thread, one frame at a time (the old path, for benchmarking).
+// The workers are this same file, started again as a worker_threads Worker (bottom of the file): the build stays one
+// self-contained script, and the workers run the app's own encodePng, so the files are byte-identical either way.
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
+import { availableParallelism } from 'node:os';
 import { join } from 'node:path';
-import { create, globals } from 'webgpu';
+import { fileURLToPath } from 'node:url';
+import { isMainThread } from 'node:worker_threads';
 import { BUILD_INFO } from '../src/buildInfo';
 import { pinnable, statesFor } from '../src/core/animation';
 import { effectiveEnumeration } from '../src/core/reciprocal';
 import { buildMetadata, describe, metadataTexts, parseMetadata, stateFromMetadata, type Metadata } from '../src/core/metadata';
 import { encodePng } from '../src/core/png';
+import { PngPool, defaultPngWorkers } from '../src/core/pngPool';
+import { runNodePngWorker, spawnNodePngEncoder } from '../src/core/pngWorkerNode';
 import type { Kernel } from '../src/core/schedule';
 import { fitRect } from '../src/core/view';
 import { renderAnimation, type DraftQuality } from '../src/gpu/animation';
 import { Engine, TOL, framesKernel, type DisplayParams } from '../src/gpu/engine';
-
-Object.assign(globalThis, globals);
-const gpu = create([]); // keep referenced for the whole process (see tests/gpu/gpuHelpers.ts)
 
 const MAX_ITER = 32;
 const PNG_IN_FLIGHT = 8;
@@ -38,6 +43,7 @@ interface Opts {
   height?: number;
   degree?: number;
   png: boolean;
+  pngWorkers: number;
   mp4: boolean;
   crf: number;
   preset: string;
@@ -46,13 +52,13 @@ interface Opts {
 }
 
 function parseArgs(argv: string[]): Opts {
-  const o: Opts = { settings: '', out: '', png: false, mp4: false, crf: 15, preset: 'slow', kernel: 'auto', bench: 0 };
+  const o: Opts = { settings: '', out: '', png: false, pngWorkers: defaultPngWorkers(availableParallelism()), mp4: false, crf: 15, preset: 'slow', kernel: 'auto', bench: 0 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i] ?? '';
-    const int = () => {
+    const int = (min = 1) => {
       const v = Number(next());
-      if (!Number.isInteger(v) || v < 1) throw new Error(`${a} needs a whole number ≥ 1`);
+      if (!Number.isInteger(v) || v < min) throw new Error(`${a} needs a whole number ≥ ${min}`);
       return v;
     };
     if (a === '--out') o.out = next();
@@ -60,6 +66,7 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--height') o.height = int();
     else if (a === '--degree') o.degree = int();
     else if (a === '--png') o.png = true;
+    else if (a === '--png-workers') o.pngWorkers = int(0);
     else if (a === '--mp4') o.mp4 = true;
     else if (a === '--crf') o.crf = Number(next());
     else if (a === '--preset') o.preset = next();
@@ -78,6 +85,9 @@ const fmt = (s: number) => `${Math.floor(s / 60)}m${String(Math.round(s % 60)).p
 
 async function main() {
   const o = parseArgs(process.argv.slice(2));
+  const { create, globals } = await import('webgpu'); // not at the top: the PNG workers run this file too and need no GPU
+  Object.assign(globalThis, globals);
+  const gpu = create([]); // keep referenced for the whole process (see tests/gpu/gpuHelpers.ts)
   const meta = parseMetadata(readFileSync(o.settings, 'utf8'));
   const st = stateFromMetadata(meta);
   const anim = st.animation;
@@ -171,7 +181,11 @@ async function main() {
     }
   }
 
-  log(`${name}: degree ${degree}, ${n} frames, ${width}x${height}, kernel ${kernel}, brightness ${anim.brightness}, enumeration ${enumeration}`);
+  log(`${name}: degree ${degree}, ${n} frames, ${width}x${height}, kernel ${kernel}, brightness ${anim.brightness}, enumeration ${enumeration}${pngDir ? `, PNG ${o.pngWorkers ? `${Math.min(o.pngWorkers, n)} workers` : 'on the main thread'}` : ''}`);
+  const frameFile = (i: number) => join(pngDir, `frame_${String(i).padStart(5, '0')}.png`);
+  const pool = pngDir && o.pngWorkers
+    ? new PngPool<number>(() => spawnNodePngEncoder(fileURLToPath(import.meta.url)), Math.min(o.pngWorkers, n), (png, i) => writeFile(frameFile(i), png))
+    : null;
   const pending: Promise<void>[] = [];
   const t0 = performance.now();
   let lastLog = 0;
@@ -192,10 +206,15 @@ async function main() {
           frame: { index: i, coeffs: info.coeffs, view: { cx: info.view.cx, cy: info.view.cy, pxPerUnit: info.view.pxPerUnit },
             exposure: info.display.exposure, gamma: info.display.gamma, countScale: info.display.countScale ?? 1, fixedMax: info.display.fixedMax ?? 0 },
         }));
-        pending.push(encodePng(rgba, width, height, texts).then(async (blob) => {
-          await writeFile(join(pngDir, `frame_${String(i).padStart(5, '0')}.png`), new Uint8Array(await blob.arrayBuffer()));
-        }));
-        if (pending.length >= PNG_IN_FLIGHT) await pending.shift();
+        if (pool) {
+          // The pool takes the buffer over (transfers it); ffmpeg may still be reading it from its pipe queue.
+          await pool.submit({ rgba: ffmpeg ? rgba.slice() : rgba, width, height, texts }, i);
+        } else {
+          pending.push(encodePng(rgba, width, height, texts).then(async (blob) => {
+            await writeFile(frameFile(i), new Uint8Array(await blob.arrayBuffer()));
+          }));
+          if (pending.length >= PNG_IN_FLIGHT) await pending.shift();
+        }
       }
       const s = (performance.now() - t0) / 1000;
       if (s - lastLog >= 30 || i === n - 1) {
@@ -206,6 +225,7 @@ async function main() {
     },
   );
   await Promise.all(pending);
+  await pool?.finish();
   if (ffmpeg) {
     ffmpeg.stdin!.end();
     await ffmpegExit;
@@ -217,7 +237,9 @@ async function main() {
   device.destroy();
 }
 
-main().catch((e) => {
-  console.error(`render-headless: ${e instanceof Error ? e.message : String(e)}`);
-  process.exit(1);
-});
+if (isMainThread) {
+  main().catch((e) => {
+    console.error(`render-headless: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  });
+} else runNodePngWorker();
