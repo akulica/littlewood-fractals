@@ -229,6 +229,83 @@ export function batchFrames(frameBytes: number, limits: { maxStorageBufferBindin
   return Math.max(1, Math.min(MAX_BATCH_FRAMES, Math.floor(cap / frameBytes)));
 }
 
+/** Auto batch size: a candidate replaces the memory cap only when it solves a frame at least this much faster (noise guard). */
+export const BATCH_SWITCH_GAIN = 0.05;
+
+/** Batch sizes the auto calibration compares, largest first: the memory cap, half of it, a quarter (never below 2:
+ * a one-frame batch has no warm start at all). One entry: nothing to compare. */
+export function batchCandidates(cap: number): number[] {
+  const sizes = [cap, Math.max(2, Math.floor(cap / 2)), Math.max(2, Math.floor(cap / 4))].filter((n) => n <= cap);
+  return [...new Set(sizes)];
+}
+
+/**
+ * Fastest candidate by solve time per frame (`ms`: best sample per batch size); the cap unless another size beats it by
+ * BATCH_SWITCH_GAIN. Sizes without a sample are ignored.
+ */
+export function chooseBatchFrames(cap: number, ms: ReadonlyMap<number, number>): number {
+  const capMs = ms.get(cap);
+  if (capMs === undefined) return cap;
+  let best = cap;
+  let bestMs = capMs * (1 - BATCH_SWITCH_GAIN);
+  for (const [size, t] of ms) {
+    if (size < cap && t < bestMs) {
+      best = size;
+      bestMs = t;
+    }
+  }
+  return best;
+}
+
+/**
+ * Sizes of the batches of one animation. A fixed size just repeats. 'auto' calibrates online: the first batches are real
+ * work rendered at the candidate sizes (cap, half, quarter, then the cap again, because a process's first batch pays
+ * for clock ramp-up and first use of the buffers), each timed by its caller (record(): GPU solve time per frame, no
+ * readback). The best size per frame, kept only if it beats the cap by BATCH_SWITCH_GAIN, then renders the rest.
+ * Animations too short to profit (fewer frames than the trial plus one more cap batch) keep the cap. Batch sizes only
+ * move where the warm-start chain restarts cold.
+ */
+export class BatchPlanner {
+  /** The size the non-trial batches use: the forced size, the cap, or (auto, after the trial) the winner. */
+  chosen: number;
+  readonly auto: boolean;
+  private readonly trial: number[];
+  private started = 0;
+  private recorded = 0;
+  private readonly samples = new Map<number, number>();
+
+  /** cap: batchFrames() for the output size; request: a forced size (capped) or 'auto'. */
+  constructor(readonly cap: number, frameCount: number, request: number | 'auto' = 'auto') {
+    if (!Number.isInteger(cap) || cap < 1) throw new RangeError('batch cap must be a whole number ≥ 1');
+    if (request !== 'auto' && (!Number.isInteger(request) || request < 1)) throw new RangeError("batchFrames must be a whole number ≥ 1 or 'auto'");
+    this.cap = Math.min(cap, Math.max(1, frameCount));
+    const candidates = batchCandidates(this.cap);
+    const trial = candidates.length > 1 ? [...candidates, this.cap] : [];
+    const profitable = trial.reduce((a, b) => a + b, 0) + this.cap <= frameCount;
+    this.auto = request === 'auto' && trial.length > 0 && profitable;
+    this.trial = this.auto ? trial : [];
+    this.chosen = request === 'auto' ? this.cap : Math.min(request, this.cap);
+  }
+
+  /** Frames of the next batch, `left` frames remaining. */
+  next(left: number): number {
+    const size = this.started < this.trial.length ? this.trial[this.started++] : this.chosen;
+    return Math.min(size, left);
+  }
+
+  /** Solve time per frame of the batch just rendered; only full-size trial batches count. */
+  record(frames: number, msPerFrame: number): void {
+    if (this.recorded >= this.trial.length || frames !== this.trial[this.recorded]) return;
+    this.samples.set(frames, Math.min(this.samples.get(frames) ?? Infinity, msPerFrame));
+    if (++this.recorded === this.trial.length) this.chosen = chooseBatchFrames(this.cap, this.samples);
+  }
+
+  /** What the trial measured (best ms per frame by batch size). */
+  get timings(): { frames: number; msPerFrame: number }[] {
+    return [...this.samples].map(([frames, msPerFrame]) => ({ frames, msPerFrame }));
+  }
+}
+
 /** H.264 encodes 4:2:0 chroma (one sample per 2x2 pixels); encoders reject odd sizes. */
 export function videoSizeError(width: number, height: number): string | null {
   return width % 2 === 0 && height % 2 === 0 ? null : 'MP4 (H.264) needs an even width and height';

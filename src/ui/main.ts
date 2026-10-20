@@ -1,6 +1,7 @@
 import './style.css';
 import { BUILD_INFO } from '../buildInfo';
 import {
+  BatchPlanner,
   batchFrames,
   frameTime,
   framesToShowKeyframes,
@@ -85,6 +86,7 @@ const framesHintText = el<HTMLSpanElement>('framesHintText');
 const fitFramesButton = el<HTMLButtonElement>('fitFrames');
 const brightnessSelect = el<HTMLSelectElement>('brightness');
 const qualitySelect = el<HTMLSelectElement>('quality');
+const batchSelect = el<HTMLSelectElement>('batchFrames');
 const outputSelect = el<HTMLSelectElement>('output');
 const renderAnimButton = el<HTMLButtonElement>('renderAnim');
 const cancelAnimButton = el<HTMLButtonElement>('cancelAnim');
@@ -656,10 +658,15 @@ async function start(): Promise<void> {
     if (!canWriteFolders()) for (const option of [...outputSelect.options]) if (option.value !== 'mp4') option.remove();
   });
 
+  const batchRequest = (): number | 'auto' => (batchSelect.value === 'auto' ? 'auto' : Number(batchSelect.value));
+
   /** The animation as it would render now (also what Save settings stores). */
   function animationRecord(width: number, height: number, bitrate: number): AnimationRecord {
     const output = outputSelect.value;
     const bytes = width * height * 16;
+    const cap = bytes > 0 ? batchFrames(bytes, device.limits) : 1; // bytes is NaN while the size field is invalid
+    const forced = batchRequest();
+    const auto = forced === 'auto' && new BatchPlanner(cap, frameCount(), 'auto').auto;
     return {
       keyframes: keys,
       frames: frameCount(),
@@ -668,7 +675,8 @@ async function start(): Promise<void> {
       easing: easingSelect.value as Easing,
       brightness: brightnessSelect.value as Brightness,
       quality: Number(qualitySelect.value),
-      batchFrames: bytes > 0 ? batchFrames(bytes, device.limits) : 1, // bytes is NaN while the size field is invalid
+      batchFrames: forced === 'auto' ? cap : Math.min(forced, cap),
+      ...(auto && { batchAuto: true }),
       output,
       codec: output === 'png' ? null : 'avc',
       bitrate: output === 'png' || !(bitrate > 0) ? null : bitrate,
@@ -733,7 +741,7 @@ async function start(): Promise<void> {
     setAnimStatus(`rendering ${n} frames at ${width}×${height}…`);
     const t0 = performance.now();
     try {
-      await renderAnimation(
+      const result = await renderAnimation(
         device,
         {
           coeffFrames,
@@ -751,6 +759,7 @@ async function start(): Promise<void> {
           enumeration: engine.enumeration,
           skipOverflowGuard: engine.skipOverflowGuard,
           kernel: engine.kernel,
+          batchFrames: batchRequest(),
         },
         (rgba, i, frameInfo) =>
           writer.frame(rgba, i, () =>
@@ -766,6 +775,7 @@ async function start(): Promise<void> {
                   gamma: frameInfo.display.gamma,
                   countScale: frameInfo.display.countScale ?? 1,
                   fixedMax: frameInfo.display.fixedMax ?? 0,
+                  batch: frameInfo.batch,
                 },
               }),
             ),
@@ -783,7 +793,7 @@ async function start(): Promise<void> {
       setAnimStatus('finishing…');
       const summary = await writer.finish();
       const s = (performance.now() - t0) / 1000;
-      setAnimStatus(`${summary}\n${n} frames in ${fmtTime(s)} (${((s * 1000) / n).toFixed(0)} ms/frame)`);
+      setAnimStatus(`${summary}\n${n} frames in ${fmtTime(s)} (${((s * 1000) / n).toFixed(0)} ms/frame), ${result.batch.frames} frames per batch${result.batch.auto ? ' (auto)' : ''}`);
     } catch (err) {
       await writer.cancel();
       if (ctl.signal.aborted) setAnimStatus('render cancelled');

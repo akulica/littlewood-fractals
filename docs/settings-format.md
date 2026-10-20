@@ -71,7 +71,8 @@ This is how another program can write a settings file that **Load…** (or drag-
 | `brightness` | yes | `"locked"`: density per area is locked to frame 0, so a zoom keeps its brightness. `"frame0"`: every frame uses frame 0's densest pixel, so zooming in darkens. `"perFrame"`: each frame is scaled to its own densest pixel, so brightness may pulse. |
 | `quality` | yes | `1`, `0.5`, `0.25` or `0.1`: the fraction of polynomials solved per frame. `1` is final quality. |
 | `output` | yes | `"mp4"`, `"mp4+png"` or `"png"`. PNG output needs a browser that can write folders (Chrome/Edge). Otherwise, or for any other string, the current choice stays. |
-| `batchFrames` | *ignored* | Integer 1–1024. Suggested: `8`. The app recomputes it. |
+| `batchFrames` | *ignored* | Integer 1–1024. Suggested: `8`. The app recomputes it. In files the app writes it is the largest warm-start batch (frames solved together, limited by GPU memory); with `batchAuto` the first batches are smaller or equal, see below. |
+| `batchAuto` | *ignored* | Optional boolean. Omit it. `true`: the app timed the first batches at 100 %, 50 % and 25 % of `batchFrames` and rendered the rest with the fastest size. Each PNG frame's `frame.batch` (`{ first, frames }`) records the batch it was solved in. Absent: every batch had `batchFrames` frames. |
 | `codec` | *ignored* | Must be present: `"avc"` or `null`. |
 | `bitrate` | *ignored* | Must be present: a number > 0, or `null`. |
 
@@ -121,7 +122,7 @@ For example, 120 keyframes at 60 frames with linear easing shows only every othe
 ## Versioning
 
 - The schema string changes, to `littlewood-fractals/2` and so on, only for changes that old readers would misread.
-- New **optional** fields are added without a version change; `fractal.enumeration` and `unverified` were added this way. Their absence always means the old behaviour.
+- New **optional** fields are added without a version change; `fractal.enumeration`, `unverified`, `animation.batchAuto` and `frame.batch` were added this way. Their absence always means the old behaviour.
 - Writers should emit only the fields listed here. Readers ignore anything else.
 
 ## Checking a generated file

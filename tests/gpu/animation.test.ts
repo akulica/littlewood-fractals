@@ -217,6 +217,48 @@ describe('renderAnimation', () => {
     expect(errors).toEqual([]);
   });
 
+  it('batchFrames: a forced size splits the frames into batches of that size, in order; the default is auto', async () => {
+    const batches: { first: number; frames: number }[] = [];
+    const sink = (_: Uint8ClampedArray, i: number, info: { batch: { first: number; frames: number } }) => void (batches[i] = info.batch);
+    const forced = await renderAnimation(device, req({ batchFrames: 4 }), sink);
+    expect(forced.batch).toEqual({ frames: 4, auto: false, timings: [] });
+    expect(batches.map((b) => b.first)).toEqual([0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8]);
+    expect(batches.every((b) => b.frames === 4)).toBe(true);
+    const capped = await renderAnimation(device, req({ batchFrames: 100 }), sink); // capped by the memory rule (8)
+    expect(capped.batch.frames).toBe(8);
+    expect(batches.map((b) => b.frames)).toEqual([8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4]);
+    const dflt = await renderAnimation(device, req(), sink); // 12 frames: too short to calibrate
+    expect(dflt.batch).toEqual({ frames: 8, auto: false, timings: [] });
+    await expect(renderAnimation(device, req({ batchFrames: 0 }), sink)).rejects.toThrow(RangeError);
+    expect(errors).toEqual([]);
+  });
+
+  it('batchFrames auto: 8, 4, 2, 8 first, then the fastest; every frame once, in order, frame 0 unchanged', async () => {
+    const coeffFrames = Array.from({ length: 36 }, (_, f) => MOVING[f % 6]);
+    const batches: { first: number; frames: number }[] = [];
+    const { frames, result } = await (async () => {
+      const frames: Uint8ClampedArray[] = [];
+      const result = await renderAnimation(device, req({ coeffFrames, kernel: 'coop' }), (rgba, i, info) => {
+        expect(i).toBe(frames.length);
+        frames.push(rgba);
+        batches[i] = info.batch;
+      });
+      return { frames, result };
+    })();
+    expect(frames).toHaveLength(36);
+    expect(result.batch.auto).toBe(true);
+    expect([...new Set(batches.map((b) => b.first))].slice(0, 4)).toEqual([0, 8, 12, 14]);
+    expect(batches.slice(0, 22).map((b) => b.frames)).toEqual([...Array(8).fill(8), ...Array(4).fill(4), ...Array(2).fill(2), ...Array(8).fill(8)]);
+    expect(result.batch.timings.map((t) => t.frames).sort()).toEqual([2, 4, 8]);
+    expect([2, 4, 8]).toContain(result.batch.frames);
+    expect(batches.slice(22, 34).every((b) => b.frames === result.batch.frames || b.first + b.frames === 36)).toBe(true);
+    expect(result.unconverged).toBe(0);
+    // frame 0 starts a chain cold either way
+    const fixed = await collect(req({ coeffFrames, kernel: 'coop', batchFrames: 8 }));
+    expect(firstDifference(new Uint32Array(frames[0].buffer), new Uint32Array(fixed.frames[0].buffer))).toBe(-1);
+    expect(errors).toEqual([]);
+  });
+
   it('kernel coop: splatFramesCoop, frame 0 matches renderImage with the coop kernel', async () => {
     const { frames, result } = await collect(req({ kernel: 'coop' }));
     expect(frames).toHaveLength(12);

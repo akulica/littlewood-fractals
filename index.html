@@ -94,6 +94,14 @@
             <option value="0.1">10 % draft</option>
           </select>
         </label>
+        <label>Frames per batch
+          <select id="batchFrames" title="Frames solved together, each warm-started from the previous one. Auto times the first batches at 100 %, 50 % and 25 % of the memory limit and keeps the fastest.">
+            <option value="auto">auto (timed)</option>
+            <option value="8">8</option>
+            <option value="4">4</option>
+            <option value="2">2</option>
+          </select>
+        </label>
         <label>Output
           <select id="output">
             <option value="mp4">MP4 (H.264)</option>

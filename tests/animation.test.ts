@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BATCH_SWITCH_GAIN,
+  BatchPlanner,
   MAX_BATCH_FRAMES,
+  batchCandidates,
   batchFrames,
+  chooseBatchFrames,
   frameTime,
   framesFor,
   framesToShowKeyframes,
@@ -147,6 +151,92 @@ describe('batchFrames', () => {
     expect(batchFrames(1920 * 1080 * 16, { maxStorageBufferBindingSize: 128 * 2 ** 20, maxBufferSize: 2 ** 31 })).toBe(4);
     expect(batchFrames(1920 * 1080 * 16, { maxStorageBufferBindingSize: 2 ** 31, maxBufferSize: 64 * 2 ** 20 })).toBe(2);
     expect(batchFrames(2 ** 30, big)).toBe(1);
+  });
+});
+
+describe('batch size auto choice', () => {
+  /** Drives a planner like renderAnimation: next() for the size, record() with the timing of that size (ms per frame). */
+  function run(planner: BatchPlanner, frameCount: number, msPerFrame: (size: number, call: number) => number): number[] {
+    const sizes: number[] = [];
+    for (let first = 0, call = 0; first < frameCount; call++) {
+      const size = planner.next(frameCount - first);
+      sizes.push(size);
+      planner.record(size, msPerFrame(size, call));
+      first += size;
+    }
+    return sizes;
+  }
+  const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
+
+  it('candidates: the cap, half, a quarter, never below 2, no duplicates', () => {
+    expect(batchCandidates(8)).toEqual([8, 4, 2]);
+    expect(batchCandidates(4)).toEqual([4, 2]);
+    expect(batchCandidates(3)).toEqual([3, 2]);
+    expect(batchCandidates(6)).toEqual([6, 3, 2]);
+    expect(batchCandidates(2)).toEqual([2]);
+    expect(batchCandidates(1)).toEqual([1]);
+  });
+
+  it('chooses the fastest size only if it beats the cap by at least 5 %', () => {
+    const t = (cap: number, half: number, quarter: number) => new Map([[8, cap], [4, half], [2, quarter]]);
+    expect(BATCH_SWITCH_GAIN).toBe(0.05);
+    expect(chooseBatchFrames(8, t(100, 120, 150))).toBe(8); // laptop-like: the cap is fastest
+    expect(chooseBatchFrames(8, t(100, 94, 130))).toBe(4); // 6 % faster
+    expect(chooseBatchFrames(8, t(100, 96, 97))).toBe(8); // within the noise guard
+    expect(chooseBatchFrames(8, t(100, 90, 80))).toBe(2); // PC-like: smaller is better, the fastest wins
+    expect(chooseBatchFrames(8, new Map([[4, 10]]))).toBe(8); // no cap sample: keep the cap
+  });
+
+  it('auto: cap, half, quarter, cap again, then the winner; every frame is covered once, in order', () => {
+    const p = new BatchPlanner(8, 40, 'auto');
+    const sizes = run(p, 40, (size) => 100 + 10 * Math.log2(size)); // smaller batches are faster
+    expect(sizes.slice(0, 4)).toEqual([8, 4, 2, 8]);
+    expect(p.chosen).toBe(2);
+    expect(sizes.slice(4).every((s) => s === 2)).toBe(true);
+    expect(sum(sizes)).toBe(40);
+    expect(p.auto).toBe(true);
+    expect(p.timings.map((t) => t.frames).sort()).toEqual([2, 4, 8]);
+  });
+
+  it('auto keeps the cap when it is fastest, and the repeated cap batch absorbs a slow first batch', () => {
+    const slowStart = new BatchPlanner(8, 40, 'auto');
+    // the first batch pays for warm-up (300), the second cap batch shows the true 100; 4 and 2 are 110 / 140
+    const sizes = run(slowStart, 40, (size, call) => (call === 0 ? 300 : size === 8 ? 100 : size === 4 ? 110 : 140));
+    expect(slowStart.chosen).toBe(8);
+    expect(sizes.slice(4)).toEqual([8, 8, 2]); // 18 frames left: two cap batches and the remainder
+    expect(sum(sizes)).toBe(40);
+  });
+
+  it('a 4K cap of 4 compares 4 against 2', () => {
+    const p = new BatchPlanner(4, 20, 'auto');
+    const sizes = run(p, 20, (size) => (size === 2 ? 80 : 100));
+    expect(sizes.slice(0, 3)).toEqual([4, 2, 4]);
+    expect(p.chosen).toBe(2);
+    expect(sum(sizes)).toBe(20);
+  });
+
+  it('short animations keep the cap and do not calibrate', () => {
+    const p = new BatchPlanner(8, 29, 'auto'); // trial 8+4+2+8 = 22, plus one more cap batch = 30
+    expect(p.auto).toBe(false);
+    expect(run(p, 29, () => 1)).toEqual([8, 8, 8, 5]);
+    expect(new BatchPlanner(8, 30, 'auto').auto).toBe(true);
+    const few = new BatchPlanner(8, 5, 'auto');
+    expect(few.cap).toBe(5); // never more than the frames there are
+    expect(run(few, 5, () => 1)).toEqual([5]);
+  });
+
+  it('a forced size is capped and repeats; a cap of 1 or 2 has nothing to compare', () => {
+    expect(run(new BatchPlanner(8, 20, 4), 20, () => 1)).toEqual([4, 4, 4, 4, 4]);
+    expect(run(new BatchPlanner(4, 10, 8), 10, () => 1)).toEqual([4, 4, 2]);
+    expect(new BatchPlanner(8, 40, 3).auto).toBe(false);
+    expect(new BatchPlanner(1, 40, 'auto').auto).toBe(false);
+    expect(new BatchPlanner(2, 40, 'auto').auto).toBe(false);
+  });
+
+  it('refuses nonsense', () => {
+    expect(() => new BatchPlanner(8, 10, 0)).toThrow(RangeError);
+    expect(() => new BatchPlanner(8, 10, 2.5)).toThrow(RangeError);
+    expect(() => new BatchPlanner(0, 10, 'auto')).toThrow(RangeError);
   });
 });
 

@@ -32,6 +32,13 @@
         { "coeffs": [{ "re": 1, "im": 0 }, { "re": -0.9, "im": 0.2 }], "view": { "cx": 0, "cy": 0, "zoom": 1 } },
         { "coeffs": [{ "re": 1, "im": 0 }, { "re": -0.6, "im": 0.7 }], "view": { "cx": -0.5, "cy": 0.6, "zoom": 3 } }
       ]
+    },
+    {
+      "name": "anim-two-complex-zoom-d16-32f", "degree": 16, "frames": 32,
+      "keys": [
+        { "coeffs": [{ "re": 1, "im": 0 }, { "re": -0.9, "im": 0.2 }], "view": { "cx": 0, "cy": 0, "zoom": 1 } },
+        { "coeffs": [{ "re": 1, "im": 0 }, { "re": -0.6, "im": 0.7 }], "view": { "cx": -0.5, "cy": 0.6, "zoom": 3 } }
+      ]
     }
   ]
 }

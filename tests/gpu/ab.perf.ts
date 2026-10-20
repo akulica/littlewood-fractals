@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { env, version as nodeVersion } from 'node:process';
 import { afterAll, expect, it } from 'vitest';
-import { batchFrames, pinnable, statesFor, type Keyframe, type PathOptions } from '../../src/core/animation';
+import { BatchPlanner, batchFrames, pinnable, statesFor, type Keyframe, type PathOptions } from '../../src/core/animation';
 import type { Complex } from '../../src/core/complex';
 import { leadingFixable, totalPolys } from '../../src/core/enumeration';
 import {
@@ -43,6 +43,10 @@ import { nodeDevice, runToEnd } from './gpuHelpers';
 // brightness so the tone-mapping matches. Same limits, checked on every frame; a row shows the worst frame of each
 // measure and ms per frame (warm rows include tone-mapping and readback). Unconverged counts polynomial-frames.
 // PNGs: ab-out/<variant>/<scene>-f<i>.png with frame metadata; heatmaps ab-out/diff/<variant>/<scene>-f<i>.png.
+// Frames per warm-start batch: warm-<enumeration>-<kernel> renders with the memory cap (8 at 800x500), the -fb2 rows
+// force 2 (more cold restarts of the warm-start chain), the -auto rows let renderAnimation time the first batches
+// (8, 4, 2, 8 frames) and keep the fastest size; they run only on scenes long enough to calibrate (>= 30 frames, the
+// 32-frame scene), where the note says which size auto chose. Same limits as every warm row.
 //
 // Unverified options (README "Unverified options": anything that fails this harness goes there instead of being
 // deleted) get REPORT-ONLY rows: rendered, compared and printed like the others with "unverified" in the variant and
@@ -113,7 +117,6 @@ const animations: AnimationScene[] = sceneFile.animations;
 const viewOf = (s: Pick<Scene, 'view'>): View => ({ cx: s.view.cx, cy: s.view.cy, pxPerUnit: (s.view.zoom * Math.min(W, H)) / 4 });
 const ANIM_PATH: PathOptions = { easing: 'linear', loop: false };
 const ANIM_BASELINE = `cold-${BASELINE}`;
-const ANIM_VARIANTS = VERIFIED.map((v) => ({ ...v, name: `warm-${v.name}` }));
 
 function buildInfo(): BuildInfo {
   const version = JSON.parse(new TextDecoder().decode(readFileSync(new URL('../../package.json', import.meta.url)))).version ?? 'unknown';
@@ -128,6 +131,19 @@ function buildInfo(): BuildInfo {
 
 const { device, errors, adapterName, gpu } = await nodeDevice();
 const build = buildInfo();
+interface AnimVariant extends Variant {
+  /** renderAnimation's batchFrames: a size, or 'auto'. The plain warm rows pin the memory cap. */
+  batch: number | 'auto';
+  /** Only on animations that are long enough for auto to calibrate. */
+  autoScenesOnly?: boolean;
+}
+const MEMORY_CAP = Math.min(8, batchFrames(W * H * 16, device.limits)); // batchFrames(), set below once the device exists
+const ANIM_VARIANTS: AnimVariant[] = VERIFIED.flatMap((v) => [
+  { ...v, name: `warm-${v.name}`, batch: MEMORY_CAP },
+  { ...v, name: `warm-${v.name}-fb2`, batch: 2 },
+  { ...v, name: `warm-${v.name}-auto`, batch: 'auto' as const, autoScenesOnly: true },
+]);
+
 afterAll(() => device.destroy());
 
 interface Render {
@@ -370,6 +386,8 @@ it.each(scenes.map((s) => [s.name, s] as const))('%s', async (_, scene) => {
 
 interface AnimationRender {
   frames: Uint8ClampedArray<ArrayBuffer>[];
+  /** renderAnimation's batch result (warm renders). */
+  batch?: { frames: number; auto: boolean };
   /** Per frame. */
   ms: number;
   unconverged: number;
@@ -413,7 +431,7 @@ async function renderCold(a: AnimationScene, frames: AnimationFrame[]): Promise<
   }
 }
 
-async function renderWarm(a: AnimationScene, frames: AnimationFrame[], v: (typeof ANIM_VARIANTS)[number]): Promise<AnimationRender> {
+async function renderWarm(a: AnimationScene, frames: AnimationFrame[], v: AnimVariant): Promise<AnimationRender> {
   const rendered: Uint8ClampedArray<ArrayBuffer>[] = [];
   const t0 = performance.now();
   const r = await renderAnimation(
@@ -431,11 +449,12 @@ async function renderWarm(a: AnimationScene, frames: AnimationFrame[], v: (typeo
       maxIter: MAX_ITER,
       enumeration: v.enumeration,
       kernel: v.kernel,
+      batchFrames: v.batch,
     },
     (rgba) => void rendered.push(rgba),
   );
   expect(r.kernel).toBe(framesKernel(v.kernel));
-  return { frames: rendered, ms: (performance.now() - t0) / frames.length, unconverged: r.unconverged };
+  return { frames: rendered, ms: (performance.now() - t0) / frames.length, unconverged: r.unconverged, batch: r.batch };
 }
 
 it.each(animations.map((a) => [a.name, a] as const))('%s (animation)', async (_, anim) => {
@@ -445,7 +464,7 @@ it.each(animations.map((a) => [a.name, a] as const))('%s (animation)', async (_,
   // The cold baseline pins each frame on its own: comparable only if every frame decides as the whole animation does.
   expect(frames.every((f) => leadingFixable(f.coeffs) === pinned), `${anim.name}: every frame pins like the animation`).toBe(true);
   const polys = Number(totalPolys(coeffFrames[0].length, anim.degree, pinned)) * frames.length; // polynomial-frames
-  const save = async (variant: string, r: AnimationRender, kernel: string, enumeration: Enumeration, batch: number) => {
+  const save = async (variant: string, r: AnimationRender, kernel: string, enumeration: Enumeration, batch: number, batchAuto = false) => {
     const animation: AnimationRecord = {
       keyframes: keys,
       frames: anim.frames,
@@ -455,6 +474,7 @@ it.each(animations.map((a) => [a.name, a] as const))('%s (animation)', async (_,
       brightness: 'perFrame',
       quality: 1,
       batchFrames: batch,
+      ...(batchAuto && { batchAuto }),
       output: 'png',
       codec: null,
       bitrate: null,
@@ -470,11 +490,14 @@ it.each(animations.map((a) => [a.name, a] as const))('%s (animation)', async (_,
   await save(ANIM_BASELINE, base, 'perPoly', 'plain', 1);
   rows.push({ scene: anim.name, variant: ANIM_BASELINE, ms: base.ms.toFixed(0), unconverged: String(base.unconverged) });
   expect.soft(base.unconverged, `${anim.name} ${ANIM_BASELINE}: unconverged polynomial-frames`).toBeLessThanOrEqual(LIMITS.unconverged * polys);
+  const calibrates = new BatchPlanner(MEMORY_CAP, frames.length, 'auto').auto;
   for (const v of ANIM_VARIANTS) {
+    if (v.autoScenesOnly && !calibrates) continue;
     const r = await renderWarm(anim, frames, v);
     const enumeration = effectiveEnumeration(coeffFrames, pinned, v.enumeration).mode;
-    await save(v.name, r, framesKernel(v.kernel), enumeration, Math.min(frames.length, batchFrames(W * H * 16, device.limits)));
-    const row: Row = { scene: anim.name, variant: v.name, ms: r.ms.toFixed(0), unconverged: String(r.unconverged), note: 'worst frame' };
+    await save(v.name, r, framesKernel(v.kernel), enumeration, typeof v.batch === 'number' ? Math.min(v.batch, MEMORY_CAP, frames.length) : Math.min(frames.length, MEMORY_CAP), r.batch?.auto);
+    const note = `worst frame${v.batch === 'auto' ? `; auto chose ${r.batch?.frames}` : ''}`;
+    const row: Row = { scene: anim.name, variant: v.name, ms: r.ms.toFixed(0), unconverged: String(r.unconverged), note };
     rows.push(row);
     expect(r.frames).toHaveLength(frames.length);
     expect.soft(r.unconverged, `${anim.name} ${v.name}: unconverged polynomial-frames`).toBeLessThanOrEqual(LIMITS.unconverged * polys);

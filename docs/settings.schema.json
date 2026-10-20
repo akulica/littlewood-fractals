@@ -88,12 +88,13 @@
         "brightness": { "enum": ["locked", "frame0", "perFrame"] },
         "quality": { "enum": [1, 0.5, 0.25, 0.1], "description": "Fraction of the polynomials solved per frame (1 = final)." },
         "batchFrames": { "type": "integer", "minimum": 1, "maximum": 1024, "description": "Ignored by Load (recomputed). Use 8." },
+        "batchAuto": { "type": "boolean", "description": "Optional, ignored by Load. true: the batch size was chosen while rendering (batchFrames is then the largest). Absent: fixed." },
         "output": { "type": "string", "description": "\"mp4\", \"mp4+png\" or \"png\"; anything else (or PNG output in a browser that cannot write folders) keeps the current choice." },
         "codec": { "type": ["string", "null"], "description": "Ignored by Load. Must be present: \"avc\" or null." },
         "bitrate": { "oneOf": [{ "type": "number", "exclusiveMinimum": 0 }, { "type": "null" }], "description": "Ignored by Load. Must be present: null is fine." }
       }
     },
-    "frame": { "type": "object", "description": "Written into PNG frames by the app. Generators: omit." }
+    "frame": { "type": "object", "description": "Written into PNG frames by the app. Generators: omit. Optional frame.batch = { first, frames }: the warm-start batch the frame was solved in." }
   },
   "$defs": {
     "complex": {

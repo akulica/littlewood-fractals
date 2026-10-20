@@ -102,6 +102,26 @@ describe('parseMetadata', () => {
     // And the state rebuilds the same metadata fields it came from.
     expect(stateFromMetadata(parseMetadata(JSON.stringify(buildMetadata({ ...input, kind: 'settings' }))))).toEqual(state);
   });
+  it('animation.batchAuto and frame.batch are optional: recorded when given, files without them still load', () => {
+    const withBatch = buildMetadata({
+      ...input,
+      animation: { ...input.animation!, batchAuto: true },
+      frame: { ...input.frame!, batch: { first: 12, frames: 4 } },
+    });
+    const back = parseMetadata(JSON.stringify(withBatch));
+    expect(back.animation!.batchAuto).toBe(true);
+    expect(back.frame!.batch).toEqual({ first: 12, frames: 4 });
+    expect(back).toEqual(withBatch);
+    const old = parseMetadata(JSON.stringify(buildMetadata(input)));
+    expect('batchAuto' in old.animation!).toBe(false);
+    expect(old.frame!.batch).toBeUndefined();
+    const bad = JSON.parse(JSON.stringify(withBatch));
+    bad.animation.batchAuto = 'yes';
+    expect(() => parseMetadata(JSON.stringify(bad))).toThrow(MetadataError);
+    bad.animation.batchAuto = true;
+    bad.frame.batch = { first: -1, frames: 4 };
+    expect(() => parseMetadata(JSON.stringify(bad))).toThrow(MetadataError);
+  });
   it('fractal.enumeration is optional: recorded when given, files without it still load', () => {
     for (const enumeration of ['reciprocal', 'plain'] as const) {
       const m = buildMetadata({ ...input, fractal: { ...input.fractal, enumeration } });

@@ -86,7 +86,7 @@ describe('docs/settings.schema.json agrees with parseMetadata', () => {
   });
 
   it('optional fields: removing any one of them still loads', () => {
-    for (const path of ['fractal.enumeration', 'output', 'animation', 'animation.keyframes.0.view', 'animation.keyframes.1.exposure,animation.keyframes.1.gamma']) {
+    for (const path of ['fractal.enumeration', 'animation.batchAuto', 'output', 'animation', 'animation.keyframes.0.view', 'animation.keyframes.1.exposure,animation.keyframes.1.gamma']) {
       let doc = example();
       for (const p of path.split(',')) {
         doc = JSON.parse(JSON.stringify(doc));
@@ -95,6 +95,14 @@ describe('docs/settings.schema.json agrees with parseMetadata', () => {
       }
       expect(() => parse(doc), path).not.toThrow();
     }
+  });
+
+  it('animation.batchAuto: documented, boolean, optional', () => {
+    expect(schema.properties.animation.properties.batchAuto.type).toBe('boolean');
+    expect(schema.properties.animation.required).not.toContain('batchAuto');
+    expect(() => parse(withValue('animation.batchAuto', true))).not.toThrow();
+    expect(() => parse(withValue('animation.batchAuto', 'auto'))).toThrow(MetadataError);
+    expect(read('settings-format.md')).toContain('`batchAuto`');
   });
 
   it('the rules JSON Schema cannot express (and dependentRequired) are enforced', () => {

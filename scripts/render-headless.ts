@@ -7,8 +7,10 @@
 //   npx vite build --ssr scripts/render-headless.ts --outDir scripts/dist
 // Run from the repo (so `webgpu` resolves from node_modules):
 //   node scripts/dist/render-headless.js <settings.json> --out <dir> [--width 3840 --height 2160] [--degree d]
-//     [--png] [--png-workers N] [--mp4] [--crf 15] [--preset slow] [--kernel auto|perPoly|coop] [--bench N]
+//     [--png] [--png-workers N] [--mp4] [--crf 15] [--preset slow] [--kernel auto|perPoly|coop] [--batch-frames N|auto] [--bench N]
 //   --bench N renders only the first N frames, writes nothing and prints the time per frame.
+//   --batch-frames N|auto frames per warm-start batch (default auto: the first batches are timed at 100/50/25 % of the
+//   memory limit and the fastest size renders the rest; N is capped by the memory limit). The log line prints the choice.
 //   --png-workers N encodes the PNG frames on N worker threads, overlapped with rendering (default
 //   min(4, max(1, cores - 2))); 0 encodes on the main thread, one frame at a time (the old path, for benchmarking).
 // The workers are this same file, started again as a worker_threads Worker (bottom of the file): the build stays one
@@ -22,7 +24,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMainThread } from 'node:worker_threads';
 import { BUILD_INFO } from '../src/buildInfo';
-import { pinnable, statesFor } from '../src/core/animation';
+import { BatchPlanner, batchFrames, pinnable, statesFor } from '../src/core/animation';
 import { effectiveEnumeration } from '../src/core/reciprocal';
 import { buildMetadata, describe, metadataTexts, parseMetadata, stateFromMetadata, type Metadata } from '../src/core/metadata';
 import { encodePng } from '../src/core/png';
@@ -48,11 +50,12 @@ interface Opts {
   crf: number;
   preset: string;
   kernel: 'auto' | Kernel;
+  batchFrames: number | 'auto';
   bench: number;
 }
 
 function parseArgs(argv: string[]): Opts {
-  const o: Opts = { settings: '', out: '', png: false, pngWorkers: defaultPngWorkers(availableParallelism()), mp4: false, crf: 15, preset: 'slow', kernel: 'auto', bench: 0 };
+  const o: Opts = { settings: '', out: '', png: false, pngWorkers: defaultPngWorkers(availableParallelism()), mp4: false, crf: 15, preset: 'slow', kernel: 'auto', batchFrames: 'auto', bench: 0 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i] ?? '';
@@ -71,7 +74,10 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--crf') o.crf = Number(next());
     else if (a === '--preset') o.preset = next();
     else if (a === '--kernel') o.kernel = next() as Opts['kernel'];
-    else if (a === '--bench') o.bench = int();
+    else if (a === '--batch-frames') {
+      if (argv[i + 1] === 'auto') i++;
+      else o.batchFrames = int();
+    } else if (a === '--bench') o.bench = int();
     else if (a.startsWith('--')) throw new Error(`unknown option ${a}`);
     else o.settings = a;
   }
@@ -131,6 +137,8 @@ async function main() {
   const enumeration = st.enumeration ?? 'reciprocal';
   const pinned = pinnable(coeffFrames);
   const n = coeffFrames.length;
+  const cap = batchFrames(width * height * 16, device.limits);
+  const autoBatch = o.batchFrames === 'auto' && new BatchPlanner(cap, n, 'auto').auto;
 
   const animMeta: Metadata = buildMetadata({
     kind: 'animation',
@@ -142,7 +150,7 @@ async function main() {
     screen: meta.screen,
     output: { ...(viewFrames?.[0] ?? outView), width, height },
     display: { colorMode: base.colorMode, exposure: base.exposure, gamma: base.gamma, countScale: base.countScale ?? 1, rings: st.display.rings },
-    animation: { ...meta.animation!, frames: n, output: o.png && o.mp4 ? 'mp4+png' : o.png ? 'png' : 'mp4', codec: o.mp4 ? 'avc' : null, bitrate: null },
+    animation: { ...meta.animation!, frames: n, batchFrames: o.batchFrames === 'auto' ? cap : Math.min(o.batchFrames, cap), batchAuto: autoBatch || undefined, output: o.png && o.mp4 ? 'mp4+png' : o.png ? 'png' : 'mp4', codec: o.mp4 ? 'avc' : null, bitrate: null },
   });
 
   const name = `littlewood-d${degree}-k${meta.fractal.coeffs.length}-${width}x${height}-${n}f`;
@@ -181,7 +189,7 @@ async function main() {
     }
   }
 
-  log(`${name}: degree ${degree}, ${n} frames, ${width}x${height}, kernel ${kernel}, brightness ${anim.brightness}, enumeration ${enumeration}${pngDir ? `, PNG ${o.pngWorkers ? `${Math.min(o.pngWorkers, n)} workers` : 'on the main thread'}` : ''}`);
+  log(`${name}: degree ${degree}, ${n} frames, ${width}x${height}, kernel ${kernel}, batch ${o.batchFrames === 'auto' ? `auto (memory limit ${cap})` : Math.min(o.batchFrames, cap)}, brightness ${anim.brightness}, enumeration ${enumeration}${pngDir ? `, PNG ${o.pngWorkers ? `${Math.min(o.pngWorkers, n)} workers` : 'on the main thread'}` : ''}`);
   const frameFile = (i: number) => join(pngDir, `frame_${String(i).padStart(5, '0')}.png`);
   const pool = pngDir && o.pngWorkers
     ? new PngPool<number>(() => spawnNodePngEncoder(fileURLToPath(import.meta.url)), Math.min(o.pngWorkers, n), (png, i) => writeFile(frameFile(i), png))
@@ -196,7 +204,7 @@ async function main() {
       displayFrames: hasDisplay ? states.map((s) => ({ exposure: s.exposure, gamma: s.gamma })) : undefined,
       rings: st.display.rings ? { scale: density } : undefined,
       brightness: anim.brightness, quality: anim.quality as DraftQuality, maxIter: MAX_ITER, enumeration,
-      skipOverflowGuard: st.unverified.skipOverflowGuard, kernel,
+      skipOverflowGuard: st.unverified.skipOverflowGuard, kernel, batchFrames: o.batchFrames,
     },
     async (rgba, i, info) => {
       if (ffmpeg && !ffmpeg.stdin!.write(rgba)) await once(ffmpeg.stdin!, 'drain');
@@ -204,7 +212,7 @@ async function main() {
         const texts = metadataTexts(buildMetadata({
           ...animMeta, kind: 'frame',
           frame: { index: i, coeffs: info.coeffs, view: { cx: info.view.cx, cy: info.view.cy, pxPerUnit: info.view.pxPerUnit },
-            exposure: info.display.exposure, gamma: info.display.gamma, countScale: info.display.countScale ?? 1, fixedMax: info.display.fixedMax ?? 0 },
+            exposure: info.display.exposure, gamma: info.display.gamma, countScale: info.display.countScale ?? 1, fixedMax: info.display.fixedMax ?? 0, batch: info.batch },
         }));
         if (pool) {
           // The pool takes the buffer over (transfers it); ffmpeg may still be reading it from its pipe queue.
@@ -232,7 +240,7 @@ async function main() {
     if (ffmpeg.exitCode !== 0) throw new Error(`ffmpeg exited with ${ffmpeg.exitCode}`);
   }
   const s = (performance.now() - t0) / 1000;
-  log(`done: ${n} frames in ${fmt(s)} (${((s * 1000) / n).toFixed(0)} ms/frame), unconverged ${result.unconverged}, fixedMax ${result.fixedMax}`);
+  log(`done: ${n} frames in ${fmt(s)} (${((s * 1000) / n).toFixed(0)} ms/frame), unconverged ${result.unconverged}, fixedMax ${result.fixedMax}, batch ${result.batch.frames}${result.batch.auto ? ` (auto: ${result.batch.timings.map((t) => `${t.frames} -> ${t.msPerFrame.toFixed(1)} ms/frame`).join(', ')})` : ''}`);
   if (errors.length) log(`GPU validation errors: ${errors.join(' | ')}`);
   device.destroy();
 }

@@ -100,8 +100,12 @@ export interface AnimationRecord {
   easing: Easing;
   brightness: Brightness;
   quality: number;
-  /** Frames per splatFrames / splatFramesCoop batch (warm-start chains are this long, so it affects f32 rounding). */
+  /** Frames per splatFrames / splatFramesCoop batch (warm-start chains are this long, so it affects f32 rounding).
+   * With batchAuto: the largest batch (the memory cap); each frame's own batch is in FrameRecord. */
   batchFrames: number;
+  /** The batch size was chosen while rendering, by timing the first batches (core/animation BatchPlanner). Absent: it
+   * was fixed (older files: the memory cap). */
+  batchAuto?: boolean;
   /** mp4 | mp4+png | png */
   output: string;
   codec: string | null;
@@ -117,6 +121,9 @@ export interface FrameRecord {
   gamma: number;
   countScale: number;
   fixedMax: number;
+  /** The batch this frame was solved in: its first frame (the warm-start chain restarted cold there) and its size.
+   * Absent: every batch had animation.batchFrames frames. */
+  batch?: { first: number; frames: number };
 }
 
 export interface Metadata {
@@ -159,7 +166,7 @@ export function buildMetadata(m: MetadataInput): Metadata {
     ...(m.output && { output: { ...m.output } }),
     display: { ...m.display },
     ...(m.animation && { animation: { ...m.animation, keyframes: m.animation.keyframes.map(copyKey) } }),
-    ...(m.frame && { frame: { ...m.frame, coeffs: m.frame.coeffs.map((c) => ({ re: c.re, im: c.im })), view: { ...m.frame.view } } }),
+    ...(m.frame && { frame: { ...m.frame, coeffs: m.frame.coeffs.map((c) => ({ re: c.re, im: c.im })), view: { ...m.frame.view }, ...(m.frame.batch && { batch: { ...m.frame.batch } }) } }),
   };
 }
 
@@ -332,6 +339,7 @@ export function parseMetadata(json: string): Metadata {
       brightness: oneOf(a, 'brightness', 'animation', BRIGHTNESS),
       quality: oneOf(a, 'quality', 'animation', QUALITIES),
       batchFrames: int(a, 'batchFrames', 'animation', 1, 1 << 10),
+      ...(a.batchAuto !== undefined && { batchAuto: bool(a, 'batchAuto', 'animation') }),
       output: str(a, 'output', 'animation'),
       codec: a.codec === null ? null : str(a, 'codec', 'animation'),
       bitrate: a.bitrate === null ? null : positive(a, 'bitrate', 'animation'),
@@ -349,6 +357,10 @@ export function parseMetadata(json: string): Metadata {
       countScale: positive(f, 'countScale', 'frame'),
       fixedMax: num(f, 'fixedMax', 'frame', (v) => v >= 0, 'a number ≥ 0'),
     };
+    if (f.batch !== undefined) {
+      const b = obj(f.batch, 'frame.batch');
+      m.frame.batch = { first: int(b, 'first', 'frame.batch', 0, 100_000), frames: int(b, 'frames', 'frame.batch', 1, 1 << 10) };
+    }
   }
   return m;
 }

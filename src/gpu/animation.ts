@@ -1,4 +1,4 @@
-import { batchFrames, frameBrightness, pinnable, type Brightness } from '../core/animation';
+import { BatchPlanner, batchFrames, frameBrightness, pinnable, type Brightness } from '../core/animation';
 import type { Complex } from '../core/complex';
 import { totalPolys } from '../core/enumeration';
 import { nextBudget, type Kernel } from '../core/schedule';
@@ -36,6 +36,10 @@ export interface AnimationRequest {
   /** Splat kernel the GPU runs faster (Engine.kernel after calibrate(), or the user's choice); default perPoly. Its
    * warm-starting batch variant renders the frames: perPoly -> splatFrames, coop -> splatFramesCoop. */
   kernel?: Kernel;
+  /** Frames per warm-start batch. 'auto' (default): the first batches are rendered at different sizes and timed, the
+   * fastest renders the rest (core/animation BatchPlanner). A number forces that size. Both are capped by the memory
+   * rule batchFrames(). Only the frames where the warm-start chain restarts cold depend on it. */
+  batchFrames?: number | 'auto';
 }
 
 export interface AnimationProgress {
@@ -52,16 +56,26 @@ export interface FrameInfo {
   coeffs: Complex[];
   view: View;
   display: DisplayParams;
+  /** The batch this frame was solved in: its first frame (where the warm-start chain restarted cold) and its size. */
+  batch: { first: number; frames: number };
 }
 
 /** Receives each frame's tightly packed RGBA, in order; rendering waits for it (backpressure from the encoder). */
 export type FrameSink = (rgba: Uint8ClampedArray<ArrayBuffer>, frame: number, info: FrameInfo) => Promise<void> | void;
 
+/** The batch sizes of a render: `frames` is the size that rendered the bulk (the forced size, or what auto chose),
+ * `auto` that it was chosen by timing, `timings` the best solve ms per frame of each size tried (auto only). */
+export interface BatchResult {
+  frames: number;
+  auto: boolean;
+  timings: { frames: number; msPerFrame: number }[];
+}
+
 const TARGET_MS = 100; // per chunk, as in exports: big chunks, far below the ~2 s Windows TDR
 
 /**
  * Renders every frame at full size off-screen. Frames go to the GPU in batches of up to 8 (core/animation
- * batchFrames): the splatFrames / splatFramesCoop kernel solves each polynomial for all frames of a batch in turn,
+ * batchFrames; req.batchFrames picks the size, 'auto' by timing the first batches): the splatFrames / splatFramesCoop kernel solves each polynomial for all frames of a batch in turn,
  * warm-starting from the previous frame's roots (2.2-2.6x faster than cold frames at 1080p). Then each frame's
  * histogram slice is tone-mapped, read back and passed to `sink`. Throws signal.reason when aborted (checked between
  * chunks and frames). Returns the kernel that ran (metadata).
@@ -72,7 +86,7 @@ export async function renderAnimation(
   sink: FrameSink,
   onProgress?: (p: AnimationProgress) => void,
   signal?: AbortSignal,
-): Promise<{ fixedMax: number; unconverged: number; kernel: FramesKernel }> {
+): Promise<{ fixedMax: number; unconverged: number; kernel: FramesKernel; batch: BatchResult }> {
   const { width, height, coeffFrames: frames } = req;
   if (frames.length === 0) throw new RangeError('no frames to render');
   const views = req.viewFrames ?? frames.map(() => req.view);
@@ -88,7 +102,8 @@ export async function renderAnimation(
     rings: req.rings && { scale: req.rings.scale, centres: frames[f].map((c) => worldToPixel(views[f], width, height, c.re, c.im)) },
   });
   const frameBytes = width * height * 16;
-  const perBatch = Math.min(frames.length, batchFrames(frameBytes, device.limits));
+  const perBatch = Math.min(frames.length, batchFrames(frameBytes, device.limits)); // memory cap: the slices buffer holds this many
+  const planner = new BatchPlanner(perBatch, frames.length, req.batchFrames ?? 'auto');
   const pinned = pinnable(frames);
   // Golden order makes every prefix an even sample of the whole set, so a draft is simply a shorter prefix.
   const share = (total: bigint) => (req.quality >= 1 ? total : (total * BigInt(Math.round(req.quality * 1000)) + 999n) / 1000n);
@@ -106,9 +121,11 @@ export async function renderAnimation(
     engine.resize(width, height);
     slices = device.createBuffer({ size: perBatch * frameBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     let budget = 1 << 12; // polynomials per chunk, each solved for a whole batch of frames; adapts to TARGET_MS
-    for (let first = 0; first < frames.length; first += perBatch) {
-      const batch = frames.slice(first, first + perBatch);
-      engine.setFrames({ frames: batch, views: views.slice(first, first + perBatch), degree: req.degree, view: req.view, maxIter: req.maxIter, pinned }, slices);
+    for (let first = 0; first < frames.length; ) {
+      const size = planner.next(frames.length - first);
+      const batch = frames.slice(first, first + size);
+      let solveMs = 0; // compute chunks only: no readback or sink
+      engine.setFrames({ frames: batch, views: views.slice(first, first + size), degree: req.degree, view: req.view, maxIter: req.maxIter, pinned }, slices);
       const work = share(engine.work.total); // solves (with reciprocal partners about half the polynomials)
       while (engine.work.done < work) {
         signal?.throwIfAborted();
@@ -118,11 +135,14 @@ export async function renderAnimation(
         const t0 = performance.now();
         device.queue.submit([enc.finish()]);
         await device.queue.onSubmittedWorkDone();
-        budget = nextBudget(budget, performance.now() - t0, TARGET_MS);
+        const dt = performance.now() - t0;
+        solveMs += dt;
+        budget = nextBudget(budget, dt, TARGET_MS);
         const done = engine.work.done === work ? perFrame : (perFrame * engine.work.done) / work;
         progress.polysDone = first * Number(perFrame) + Number(done) * batch.length;
         onProgress?.({ ...progress });
       }
+      planner.record(batch.length, solveMs / batch.length);
       unconverged += (await engine.readStats()).unconverged;
       for (let i = 0; i < batch.length; i++) {
         signal?.throwIfAborted();
@@ -139,12 +159,13 @@ export async function renderAnimation(
         const enc = device.createCommandEncoder();
         engine.loadHistogram(enc, slices, i * frameBytes);
         engine.encodeDisplay(enc, out.view, display);
-        await sink(await out.read(enc), f, { coeffs: frames[f], view: views[f], display });
+        await sink(await out.read(enc), f, { coeffs: frames[f], view: views[f], display, batch: { first, frames: batch.length } });
         progress.frame = first + i + 1;
         onProgress?.({ ...progress });
       }
+      first += size;
     }
-    return { fixedMax, unconverged, kernel: framesKernel(engine.kernel) };
+    return { fixedMax, unconverged, kernel: framesKernel(engine.kernel), batch: { frames: planner.chosen, auto: planner.auto, timings: planner.timings } };
   } finally {
     slices?.destroy();
     out.destroy();
