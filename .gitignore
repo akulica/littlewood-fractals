@@ -6,3 +6,7 @@ dist/
 
 # A/B image harness output (npm run ab)
 ab-out/
+
+# local renders / reference media, and generated settings files (regenerate with scripts/three-body.mjs)
+images/
+/three-body-*.settings.json

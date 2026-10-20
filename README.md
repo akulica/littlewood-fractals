@@ -24,6 +24,8 @@ npm run build     # static site in dist/
 
 `scripts/pc-bench.cmd` runs tests and benchmarks on a Windows machine without Node installed. It downloads a portable Node 22 into `%LOCALAPPDATA%` (no admin rights needed). Run it from a copy of the repo **in a path without spaces**, e.g. `C:\lwf\scripts\pc-bench.cmd`.
 
+`scripts/three-body.mjs` writes a settings file whose coefficients move like the three bodies of a periodic three-body orbit (figure-8 and 11 Šuvakov–Dmitrašinović orbits; `--list`, options in the file header). `scripts/render-headless.ts` renders any settings file's animation without a browser, through Dawn, to PNG frames and/or an MP4 (needs `ffmpeg` on PATH). Build it with `node node_modules/vite/bin/vite.js build --ssr scripts/render-headless.ts --outDir scripts/dist`, then run `node scripts/dist/render-headless.js <settings.json> --out <dir> [--width W --height H] [--degree d] [--bench N]`.
+
 ## Controls
 
 | Action | How |
