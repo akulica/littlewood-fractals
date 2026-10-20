@@ -48,8 +48,9 @@ export interface PathOptions {
  */
 export type Brightness = 'locked' | 'frame0' | 'perFrame';
 
-/** Frames solved per thread in one splatFrames batch. Measured best on both GPUs (plan §1.2): fewer frames
- * leave warm-start gains unused, more lose histogram cache locality. = the coefficient buffer's frame capacity. */
+/** Frames solved per polynomial in one splatFrames / splatFramesCoop batch. Measured best on both GPUs with
+ * splatFrames (plan §1.2): fewer frames leave warm-start gains unused, more lose histogram cache locality.
+ * = the coefficient buffer's frame capacity. */
 export const MAX_BATCH_FRAMES = 8;
 /** Upper bound for one batch's histograms (all frames of a batch live on the GPU at once). */
 export const MAX_BATCH_BYTES = 512 * 2 ** 20;
@@ -199,7 +200,7 @@ export function pinnable(frames: Complex[][]): boolean {
   return frames.length > 0 && frames.every(leadingFixable);
 }
 
-/** Frames per splatFrames batch for frames of `frameBytes` histogram each (W * H * 16): 8 at 1080p, 4 at 3840x2160. */
+/** Frames per splatFrames / splatFramesCoop batch for frames of `frameBytes` histogram each (W * H * 16): 8 at 1080p, 4 at 3840x2160. */
 export function batchFrames(frameBytes: number, limits: { maxStorageBufferBindingSize: number; maxBufferSize: number }): number {
   const cap = Math.min(MAX_BATCH_BYTES, limits.maxStorageBufferBindingSize, limits.maxBufferSize);
   return Math.max(1, Math.min(MAX_BATCH_FRAMES, Math.floor(cap / frameBytes)));

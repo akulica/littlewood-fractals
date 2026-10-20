@@ -36,7 +36,7 @@ import { nextBudget, type Kernel } from '../core/schedule';
 import { fitRect, fitView, panBy, pixelToWorld, viewRect, worldToPixel, zoomAt, type View, type ViewRect } from '../core/view';
 import { renderAnimation, type DraftQuality } from '../gpu/animation';
 import { getDevice } from '../gpu/device';
-import { Engine, MAX_COEFFS, MAX_DEGREE, TOL, renderImage, type Calibration, type DisplayParams } from '../gpu/engine';
+import { Engine, MAX_COEFFS, MAX_DEGREE, TOL, framesKernel, renderImage, type Calibration, type DisplayParams } from '../gpu/engine';
 import type { AnimationWriter, OutputKind } from './animationOutput';
 
 const TARGET_MS = 12; // GPU time per frame while interacting; leaves headroom for 60 Hz
@@ -658,7 +658,7 @@ async function start(): Promise<void> {
     const animMeta = buildMetadata(
       metaInput('animation', {
         pinned: pinnable(coeffFrames),
-        kernel: 'splatFrames', // thread per polynomial with warm start, whatever the live view's kernel is
+        kernel: framesKernel(engine.kernel), // warm-starting batch variant of the live view's kernel (auto or forced)
         enumeration: enumerationOf(coeffFrames, pinnable(coeffFrames)),
         output: { ...(viewFrames?.[0] ?? outView), width, height },
         display: base,
@@ -706,6 +706,7 @@ async function start(): Promise<void> {
           quality: Number(qualitySelect.value) as DraftQuality,
           maxIter: MAX_ITER,
           enumeration: engine.enumeration,
+          kernel: engine.kernel,
         },
         (rgba, i, frameInfo) =>
           writer.frame(rgba, i, () =>

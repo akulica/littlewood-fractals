@@ -1,5 +1,7 @@
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Complex } from '../../src/core/complex';
+import type { Enumeration } from '../../src/core/reciprocal';
+import type { Kernel } from '../../src/core/schedule';
 import { fitView } from '../../src/core/view';
 import { renderAnimation, type AnimationProgress, type AnimationRequest } from '../../src/gpu/animation';
 import { Engine, RgbaReadback, renderImage } from '../../src/gpu/engine';
@@ -24,12 +26,15 @@ const PINNED: Complex[][] = Array.from({ length: 5 }, (_, f) => {
   return [c, { re: -c.re, im: -c.im }];
 });
 
-/** Batch render through splatFrames: one histogram per frame, plus the unconverged count. */
-async function batchRender(frames: Complex[][], degree: number, pinned: boolean, budget = 1 << 20) {
+/** Batch render through splatFrames (perPoly) or splatFramesCoop (coop): one histogram per frame, plus the
+ * unconverged count. */
+async function batchRender(frames: Complex[][], degree: number, pinned: boolean, budget = 1 << 20, kernel: Kernel = 'perPoly', maxIter = 32) {
   const frameBytes = SIZE * SIZE * 16;
   const target = device.createBuffer({ size: frames.length * frameBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  engine.kernel = kernel;
   engine.resize(SIZE, SIZE);
-  engine.setFrames({ frames, degree, view: VIEW, maxIter: 32, pinned }, target);
+  engine.setFrames({ frames, degree, view: VIEW, maxIter, pinned }, target);
+  expect(engine.activeFramesKernel).toBe(kernel === 'coop' ? 'splatFramesCoop' : 'splatFrames');
   await runToEnd(device, engine, budget);
   const all = new Uint32Array(await readBuffer(device, target, frames.length * frameBytes));
   target.destroy();
@@ -37,9 +42,9 @@ async function batchRender(frames: Complex[][], degree: number, pinned: boolean,
   return { hists: frames.map((_, f) => all.subarray((f * frameBytes) / 4, ((f + 1) * frameBytes) / 4)), unconverged };
 }
 
-/** Same frame rendered on its own by the ordinary (cold, splat) path. */
-async function coldRender(coeffs: Complex[], degree: number): Promise<Uint32Array> {
-  engine.kernel = 'perPoly';
+/** Same frame rendered on its own by the ordinary (cold) path: splat (perPoly) or splatCoop (coop). */
+async function coldRender(coeffs: Complex[], degree: number, kernel: Kernel = 'perPoly'): Promise<Uint32Array> {
+  engine.kernel = kernel;
   engine.resize(SIZE, SIZE);
   engine.setParams({ coeffs, degree, view: VIEW, maxIter: 32 });
   await runToEnd(device, engine, 1 << 20);
@@ -52,13 +57,27 @@ function countL1(a: Uint32Array, b: Uint32Array): number {
   return d;
 }
 
-describe('splatFrames (warm-started batch) vs one cold render per frame', () => {
+// Each batch kernel against the cold renders of its own kernel, under both enumerations.
+const BATCH_CASES: [Kernel, Enumeration][] = [
+  ['perPoly', 'reciprocal'],
+  ['perPoly', 'plain'],
+  ['coop', 'reciprocal'],
+  ['coop', 'plain'],
+];
+describe.each(BATCH_CASES)('warm-started batch (%s kernel, %s) vs one cold render per frame', (kernel, enumeration) => {
+  beforeEach(() => {
+    engine.enumeration = enumeration;
+  });
+  afterEach(() => {
+    engine.enumeration = 'reciprocal';
+  });
+
   // Measured on Arc 140T: L1 2-3.5e-4 of the roots per frame.
   it('unpinned {1, c}, c moving: same root counts, roots within a pixel, all converged', async () => {
-    const batch = await batchRender(MOVING, 12, false, 1000); // many chunks: the warm state lives in each thread
+    const batch = await batchRender(MOVING, 12, false, 1000, kernel); // many chunks: the warm state lives in each thread / workgroup
     expect(batch.unconverged).toBe(0);
     for (let f = 0; f < MOVING.length; f++) {
-      const cold = await coldRender(MOVING[f], 12);
+      const cold = await coldRender(MOVING[f], 12, kernel);
       const n = countSum(cold);
       expect(n).toBe(2 ** 13 * 12);
       expect(Math.abs(countSum(batch.hists[f]) - n)).toBeLessThanOrEqual(n * 1e-4);
@@ -72,9 +91,9 @@ describe('splatFrames (warm-started batch) vs one cold render per frame', () => 
   // of the rotated copies differ from each other by 3-5e-3 (Littlewood polynomials have many multiple roots, which
   // f32 resolves only to noise), so they are not the reference here.
   it('pinned {c, -c}: every frame is frame 0 again, all converged', async () => {
-    const batch = await batchRender(PINNED, 12, true, 1000);
+    const batch = await batchRender(PINNED, 12, true, 1000, kernel);
     expect(batch.unconverged).toBe(0);
-    const cold0 = await coldRender(PINNED[0], 12);
+    const cold0 = await coldRender(PINNED[0], 12, kernel);
     expect(countSum(cold0)).toBe(2 ** 12 * 12); // leading digit pinned: 2^12 polynomials, not 2^13
     for (const hist of batch.hists) {
       expect(countSum(hist)).toBe(2 ** 12 * 12);
@@ -86,8 +105,8 @@ describe('splatFrames (warm-started batch) vs one cold render per frame', () => 
   it('a one-frame batch equals the ordinary render (no warm start happens)', async () => {
     for (const frame of [MOVING[2], PINNED[3]]) {
       const pinned = frame === PINNED[3];
-      const one = (await batchRender([frame], 10, pinned)).hists[0];
-      const cold = await coldRender(frame, 10);
+      const one = (await batchRender([frame], 10, pinned, 1 << 20, kernel)).hists[0];
+      const cold = await coldRender(frame, 10, kernel);
       expect(countSum(one)).toBe(countSum(cold));
       expect(firstDifference(one, cold)).toBe(-1);
     }
@@ -95,10 +114,25 @@ describe('splatFrames (warm-started batch) vs one cold render per frame', () => 
   });
 
   it('frame 0 of a batch is cold, so it equals the ordinary render exactly', async () => {
-    const batch = await batchRender(MOVING, 10, false);
-    expect(firstDifference(batch.hists[0], await coldRender(MOVING[0], 10))).toBe(-1);
+    const batch = await batchRender(MOVING, 10, false, 1 << 20, kernel);
+    expect(firstDifference(batch.hists[0], await coldRender(MOVING[0], 10, kernel))).toBe(-1);
   });
 
+  // maxIter 3 leaves most polynomials unconverged. Counted once per polynomial-frame (2 with a reciprocal partner),
+  // never per root: at most the frames' polynomials, and the two kernels agree roughly.
+  it('unconverged counts polynomial-frames', async () => {
+    const polys = 2 ** 13 * 3; // polynomial-frames, whichever enumeration covers them
+    const batch = await batchRender(MOVING.slice(0, 3), 12, false, 1 << 20, kernel, 3);
+    const ref = await batchRender(MOVING.slice(0, 3), 12, false, 1 << 20, 'perPoly', 3);
+    expect(batch.unconverged).toBeGreaterThan(polys * 0.3);
+    expect(batch.unconverged).toBeLessThanOrEqual(polys);
+    expect(batch.unconverged).toBeGreaterThan(ref.unconverged * 0.5);
+    expect(batch.unconverged).toBeLessThan(ref.unconverged * 2);
+    expect(errors).toEqual([]);
+  });
+});
+
+describe('display', () => {
   it('display honours fixedMax and readMaxCount reports the densest pixel', async () => {
     const hist = await coldRender(MOVING[1], 10);
     let max = 0;
@@ -171,6 +205,7 @@ describe('renderAnimation', () => {
       expect(opaque).toBe(true);
     }
     expect(result.unconverged).toBe(0);
+    expect(result.kernel).toBe('splatFrames');
     const last = progress.at(-1)!;
     expect(last).toEqual({ frame: 12, frames: 12, polysDone: 2 ** 11 * 12, polysTotal: 2 ** 11 * 12 });
     const still = await renderImage(device, { kernel: 'perPoly', params: { coeffs: MOVING[0], degree: 10, view, maxIter: 32 }, display, width: W, height: H });
@@ -179,6 +214,22 @@ describe('renderAnimation', () => {
     let differing = 0;
     for (let i = 0; i < still.length; i += 4) if (frames[11][i] !== still[i]) differing++;
     expect(differing).toBeLessThan(W * H * 0.01);
+    expect(errors).toEqual([]);
+  });
+
+  it('kernel coop: splatFramesCoop, frame 0 matches renderImage with the coop kernel', async () => {
+    const { frames, result } = await collect(req({ kernel: 'coop' }));
+    expect(frames).toHaveLength(12);
+    expect(result.kernel).toBe('splatFramesCoop');
+    expect(result.unconverged).toBe(0);
+    const still = await renderImage(device, { kernel: 'coop', params: { coeffs: MOVING[0], degree: 10, view, maxIter: 32 }, display, width: W, height: H });
+    expect(firstDifference(new Uint32Array(frames[0].buffer), new Uint32Array(still.buffer))).toBe(-1);
+    const perPoly = await collect(req());
+    for (let f = 1; f < 12; f++) {
+      let differing = 0;
+      for (let i = 0; i < still.length; i += 4) if (frames[f][i] !== perPoly.frames[f][i]) differing++;
+      expect(differing).toBeLessThan(W * H * 0.01);
+    }
     expect(errors).toEqual([]);
   });
 

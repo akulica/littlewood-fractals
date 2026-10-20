@@ -47,7 +47,8 @@ export interface FractalRecord {
   /** Leading digit pinned (symmetric sets: same picture, k times less work). */
   pinned: boolean;
   ordering: string;
-  /** Splat kernel actually used: perPoly or coop (f32 rounding differs between them). */
+  /** Splat kernel actually used (f32 rounding differs between them): perPoly or coop; animations splatFrames or
+   * splatFramesCoop (their warm-starting variants). */
   kernel: string;
   /** reciprocal (z and 1/z from one solve) or plain, as actually used (a pinned set without a shared group table
    * runs plain); f32 rounding differs slightly. Absent in files made before it existed (those were plain). */
@@ -89,7 +90,7 @@ export interface AnimationRecord {
   easing: Easing;
   brightness: Brightness;
   quality: number;
-  /** Frames per splatFrames batch (warm-start chains are this long, so it affects f32 rounding). */
+  /** Frames per splatFrames / splatFramesCoop batch (warm-start chains are this long, so it affects f32 rounding). */
   batchFrames: number;
   /** mp4 | mp4+png | png */
   output: string;

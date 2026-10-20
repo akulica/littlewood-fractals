@@ -1,9 +1,9 @@
 import { batchFrames, frameBrightness, pinnable, type Brightness } from '../core/animation';
 import type { Complex } from '../core/complex';
 import { totalPolys } from '../core/enumeration';
-import { nextBudget } from '../core/schedule';
+import { nextBudget, type Kernel } from '../core/schedule';
 import { worldToPixel, type View } from '../core/view';
-import { Engine, RgbaReadback, type DisplayParams, type Enumeration } from './engine';
+import { Engine, RgbaReadback, framesKernel, type DisplayParams, type Enumeration, type FramesKernel } from './engine';
 
 /** Fraction of each frame's polynomials to render (a golden-order prefix: unbiased, just noisier). */
 export type DraftQuality = 1 | 0.5 | 0.25 | 0.1;
@@ -31,6 +31,9 @@ export interface AnimationRequest {
   maxIter: number;
   /** Default reciprocal (Engine.enumeration). */
   enumeration?: Enumeration;
+  /** Splat kernel the GPU runs faster (Engine.kernel after calibrate(), or the user's choice); default perPoly. Its
+   * warm-starting batch variant renders the frames: perPoly -> splatFrames, coop -> splatFramesCoop. */
+  kernel?: Kernel;
 }
 
 export interface AnimationProgress {
@@ -56,9 +59,10 @@ const TARGET_MS = 100; // per chunk, as in exports: big chunks, far below the ~2
 
 /**
  * Renders every frame at full size off-screen. Frames go to the GPU in batches of up to 8 (core/animation
- * batchFrames): the splatFrames kernel solves each polynomial for all frames of a batch in turn, warm-starting from
- * the previous frame's roots (2.2-2.6x faster than cold frames at 1080p). Then each frame's histogram slice is
- * tone-mapped, read back and passed to `sink`. Throws signal.reason when aborted (checked between chunks and frames).
+ * batchFrames): the splatFrames / splatFramesCoop kernel solves each polynomial for all frames of a batch in turn,
+ * warm-starting from the previous frame's roots (2.2-2.6x faster than cold frames at 1080p). Then each frame's
+ * histogram slice is tone-mapped, read back and passed to `sink`. Throws signal.reason when aborted (checked between
+ * chunks and frames). Returns the kernel that ran (metadata).
  */
 export async function renderAnimation(
   device: GPUDevice,
@@ -66,7 +70,7 @@ export async function renderAnimation(
   sink: FrameSink,
   onProgress?: (p: AnimationProgress) => void,
   signal?: AbortSignal,
-): Promise<{ fixedMax: number; unconverged: number }> {
+): Promise<{ fixedMax: number; unconverged: number; kernel: FramesKernel }> {
   const { width, height, coeffFrames: frames } = req;
   if (frames.length === 0) throw new RangeError('no frames to render');
   const views = req.viewFrames ?? frames.map(() => req.view);
@@ -90,6 +94,7 @@ export async function renderAnimation(
   const progress: AnimationProgress = { frame: 0, frames: frames.length, polysDone: 0, polysTotal: Number(perFrame) * frames.length };
   const engine = new Engine(device, 'rgba8unorm');
   engine.enumeration = req.enumeration ?? 'reciprocal';
+  engine.kernel = req.kernel ?? 'perPoly';
   const out = new RgbaReadback(device, width, height);
   let slices: GPUBuffer | null = null;
   let fixedMax = 0;
@@ -136,7 +141,7 @@ export async function renderAnimation(
         onProgress?.({ ...progress });
       }
     }
-    return { fixedMax, unconverged };
+    return { fixedMax, unconverged, kernel: framesKernel(engine.kernel) };
   } finally {
     slices?.destroy();
     out.destroy();

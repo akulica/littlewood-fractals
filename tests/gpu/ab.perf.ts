@@ -2,13 +2,25 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { env, version as nodeVersion } from 'node:process';
 import { afterAll, expect, it } from 'vitest';
+import { batchFrames, pinnable, statesFor, type Keyframe, type PathOptions } from '../../src/core/animation';
 import type { Complex } from '../../src/core/complex';
-import { leadingFixable } from '../../src/core/enumeration';
-import { PNG_KEYWORD, buildMetadata, metadataTexts, parseMetadata, type BuildInfo, type Metadata } from '../../src/core/metadata';
+import { leadingFixable, totalPolys } from '../../src/core/enumeration';
+import {
+  PNG_KEYWORD,
+  buildMetadata,
+  metadataTexts,
+  parseMetadata,
+  type AnimationRecord,
+  type BuildInfo,
+  type FrameRecord,
+  type Metadata,
+} from '../../src/core/metadata';
 import { encodePng, readPngTexts } from '../../src/core/png';
+import { effectiveEnumeration } from '../../src/core/reciprocal';
 import type { Kernel } from '../../src/core/schedule';
-import { pixelToWorld, type View } from '../../src/core/view';
-import { Engine, RgbaReadback, TOL, type DisplayParams, type Enumeration } from '../../src/gpu/engine';
+import { fitRect, pixelToWorld, viewRect, type View } from '../../src/core/view';
+import { renderAnimation } from '../../src/gpu/animation';
+import { Engine, RgbaReadback, TOL, framesKernel, type DisplayParams, type Enumeration } from '../../src/gpu/engine';
 import { nodeDevice, runToEnd } from './gpuHelpers';
 
 // A/B image harness for optimisations: `npm run ab`. Renders the scenes of tests/scenes/scenes.json at 800x500 under
@@ -24,6 +36,13 @@ import { nodeDevice, runToEnd } from './gpuHelpers';
 //
 // Cross-build: AB_REF_DIR=<another build's ab-out/plain-perPoly> also compares this build's baseline with those
 // images (row "ref <commit>"); their metadata must describe the same scenes.
+//
+// Animations (the "animations" of scenes.json): every frame rendered cold on its own by the baseline path
+// (cold-plain-perPoly: Engine.setParams per frame at the frame's own view) against renderAnimation's warm-started
+// batch kernels (warm-<enumeration>-<kernel>: splatFrames for perPoly, splatFramesCoop for coop), with per-frame
+// brightness so the tone-mapping matches. Same limits, checked on every frame; a row shows the worst frame of each
+// measure and ms per frame (warm rows include tone-mapping and readback). Unconverged counts polynomial-frames.
+// PNGs: ab-out/<variant>/<scene>-f<i>.png with frame metadata; heatmaps ab-out/diff/<variant>/<scene>-f<i>.png.
 //
 // Thresholds, calibrated on Intel Arc 140T (Dawn/D3D12) with the big-root fix: the worst of the 8 scenes x 3 variants,
 // then 2x headroom or more. The yardstick is the f32 noise between the two plain kernels on the same polynomials.
@@ -55,8 +74,20 @@ interface Scene {
   /** zoom 1 = the app's Reset view (radius 2 across the shorter side). */
   view: { cx: number; cy: number; zoom: number };
 }
-const scenes: Scene[] = JSON.parse(new TextDecoder().decode(readFileSync(new URL('../scenes/scenes.json', import.meta.url)))).scenes;
-const viewOf = (s: Scene): View => ({ cx: s.view.cx, cy: s.view.cy, pxPerUnit: (s.view.zoom * Math.min(W, H)) / 4 });
+interface AnimationScene {
+  name: string;
+  degree: number;
+  frames: number;
+  /** Keyframes: coefficients and view (as Scene), interpolated as the app does (ANIM_PATH). */
+  keys: Pick<Scene, 'coeffs' | 'view'>[];
+}
+const sceneFile = JSON.parse(new TextDecoder().decode(readFileSync(new URL('../scenes/scenes.json', import.meta.url))));
+const scenes: Scene[] = sceneFile.scenes;
+const animations: AnimationScene[] = sceneFile.animations;
+const viewOf = (s: Pick<Scene, 'view'>): View => ({ cx: s.view.cx, cy: s.view.cy, pxPerUnit: (s.view.zoom * Math.min(W, H)) / 4 });
+const ANIM_PATH: PathOptions = { easing: 'linear', loop: false };
+const ANIM_BASELINE = `cold-${BASELINE}`;
+const ANIM_VARIANTS = VARIANTS.map((v) => ({ ...v, name: `warm-${v.name}` }));
 
 function buildInfo(): BuildInfo {
   const version = JSON.parse(new TextDecoder().decode(readFileSync(new URL('../../package.json', import.meta.url)))).version ?? 'unknown';
@@ -97,21 +128,37 @@ async function render(scene: Scene, v: (typeof VARIANTS)[number]): Promise<Rende
     engine.encodeDisplay(enc, out.view, DISPLAY);
     const rgba = await out.read(enc);
     const pinned = leadingFixable(scene.coeffs);
-    const meta = buildMetadata({
-      kind: 'image',
-      build,
-      environment: { gpu, userAgent: `node ${nodeVersion}, Dawn (webgpu npm), tests/gpu/ab.perf.ts`, timestamp: new Date().toISOString() },
-      fractal: { coeffs: scene.coeffs, degree: scene.degree, maxIter: MAX_ITER, tol: TOL, pinned, ordering: engine.ordering, kernel: v.kernel, enumeration: engine.activeEnumeration ?? v.enumeration },
-      screen: { ...view, width: W, height: H, dpr: 1 },
-      output: { ...view, width: W, height: H },
-      display: { colorMode: DISPLAY.colorMode, exposure: DISPLAY.exposure, gamma: DISPLAY.gamma, countScale: 1, rings: false },
-    });
+    const meta = metadataOf({ coeffs: scene.coeffs, degree: scene.degree, pinned, kernel: v.kernel, enumeration: engine.activeEnumeration ?? v.enumeration, view });
     await writePng(`${OUT}/${v.name}/${scene.name}.png`, rgba, metadataTexts(meta));
     return { rgba, ms, unconverged, polys: Number(engine.progress.total) };
   } finally {
     out.destroy();
     engine.destroy();
   }
+}
+
+/** Reproduction metadata of an A/B image: a still, or with `frame` one frame of an animation. */
+function metadataOf(o: {
+  coeffs: Complex[];
+  degree: number;
+  pinned: boolean;
+  kernel: string;
+  enumeration: Enumeration;
+  view: View;
+  animation?: AnimationRecord;
+  frame?: FrameRecord;
+}): Metadata {
+  return buildMetadata({
+    kind: o.frame ? 'frame' : 'image',
+    build,
+    environment: { gpu, userAgent: `node ${nodeVersion}, Dawn (webgpu npm), tests/gpu/ab.perf.ts`, timestamp: new Date().toISOString() },
+    fractal: { coeffs: o.coeffs, degree: o.degree, maxIter: MAX_ITER, tol: TOL, pinned: o.pinned, ordering: 'golden', kernel: o.kernel, enumeration: o.enumeration },
+    screen: { ...o.view, width: W, height: H, dpr: 1 },
+    output: { ...o.view, width: W, height: H },
+    display: { colorMode: DISPLAY.colorMode, exposure: DISPLAY.exposure, gamma: DISPLAY.gamma, countScale: 1, rings: false },
+    animation: o.animation,
+    frame: o.frame,
+  });
 }
 
 async function writePng(path: string, rgba: Uint8ClampedArray, texts: Parameters<typeof encodePng>[3] = []): Promise<void> {
@@ -209,7 +256,7 @@ interface Row {
 }
 const rows: Row[] = [];
 
-const WIDTHS = [18, 30, 7, 7, 7, 7, 7, 6];
+const WIDTHS = [26, 24, 7, 7, 7, 7, 7, 6];
 const fmtCells = (cells: string[]) => cells.map((c, i) => (i < 2 ? c.padEnd(WIDTHS[i]) : i < WIDTHS.length ? c.padStart(WIDTHS[i]) : c)).join(' ');
 const fmtRow = (r: Row) => {
   const d = r.diff;
@@ -277,6 +324,129 @@ it.each(scenes.map((s) => [s.name, s] as const))('%s', async (_, scene) => {
     expect.soft(row.diff.mean, `${scene.name} vs reference build: mean |diff|`).toBeLessThanOrEqual(LIMITS.mean);
     expect.soft(row.diff.centre, `${scene.name} vs reference build: lit-pixel difference within |z| < 0.25`).toBeLessThanOrEqual(LIMITS.centre);
     expect.soft(row.diff.block, `${scene.name} vs reference build: lit-pixel difference in a 32x32 block`).toBeLessThanOrEqual(LIMITS.block);
+  }
+  expect(errors).toEqual([]);
+});
+
+interface AnimationRender {
+  frames: Uint8ClampedArray<ArrayBuffer>[];
+  /** Per frame. */
+  ms: number;
+  unconverged: number;
+}
+
+interface AnimationFrame {
+  coeffs: Complex[];
+  view: View;
+}
+
+/** The keyframes as the app stores them and every frame's coefficients and view (fitted to W x H), from statesFor. */
+function animationStates(a: AnimationScene): { keys: Keyframe[]; frames: AnimationFrame[] } {
+  const keys: Keyframe[] = a.keys.map((k) => ({ coeffs: k.coeffs, view: viewRect(viewOf(k), W, H) }));
+  const states = statesFor(keys, a.frames, ANIM_PATH, { view: keys[0].view!, exposure: DISPLAY.exposure, gamma: DISPLAY.gamma });
+  return { keys, frames: states.map((s) => ({ coeffs: s.coeffs, view: fitRect(s.view, W, H) })) };
+}
+
+async function renderCold(a: AnimationScene, frames: AnimationFrame[]): Promise<AnimationRender> {
+  const engine = new Engine(device, 'rgba8unorm');
+  const out = new RgbaReadback(device, W, H);
+  const result: AnimationRender = { frames: [], ms: 0, unconverged: 0 };
+  try {
+    engine.kernel = 'perPoly';
+    engine.enumeration = 'plain';
+    engine.resize(W, H);
+    for (const f of frames) {
+      engine.setParams({ coeffs: f.coeffs, degree: a.degree, view: f.view, maxIter: MAX_ITER });
+      const t0 = performance.now();
+      await runToEnd(device, engine, BUDGET);
+      result.ms += performance.now() - t0;
+      result.unconverged += (await engine.readStats()).unconverged;
+      const enc = device.createCommandEncoder();
+      engine.encodeDisplay(enc, out.view, DISPLAY);
+      result.frames.push(await out.read(enc));
+    }
+    result.ms /= frames.length;
+    return result;
+  } finally {
+    out.destroy();
+    engine.destroy();
+  }
+}
+
+async function renderWarm(a: AnimationScene, frames: AnimationFrame[], v: (typeof ANIM_VARIANTS)[number]): Promise<AnimationRender> {
+  const rendered: Uint8ClampedArray<ArrayBuffer>[] = [];
+  const t0 = performance.now();
+  const r = await renderAnimation(
+    device,
+    {
+      coeffFrames: frames.map((f) => f.coeffs),
+      viewFrames: frames.map((f) => f.view),
+      degree: a.degree,
+      view: frames[0].view,
+      width: W,
+      height: H,
+      display: DISPLAY,
+      brightness: 'perFrame', // each frame against its own densest pixel, as the cold baseline
+      quality: 1,
+      maxIter: MAX_ITER,
+      enumeration: v.enumeration,
+      kernel: v.kernel,
+    },
+    (rgba) => void rendered.push(rgba),
+  );
+  expect(r.kernel).toBe(framesKernel(v.kernel));
+  return { frames: rendered, ms: (performance.now() - t0) / frames.length, unconverged: r.unconverged };
+}
+
+it.each(animations.map((a) => [a.name, a] as const))('%s (animation)', async (_, anim) => {
+  const { keys, frames } = animationStates(anim);
+  const coeffFrames = frames.map((f) => f.coeffs);
+  const pinned = pinnable(coeffFrames);
+  // The cold baseline pins each frame on its own: comparable only if every frame decides as the whole animation does.
+  expect(frames.every((f) => leadingFixable(f.coeffs) === pinned), `${anim.name}: every frame pins like the animation`).toBe(true);
+  const polys = Number(totalPolys(coeffFrames[0].length, anim.degree, pinned)) * frames.length; // polynomial-frames
+  const save = async (variant: string, r: AnimationRender, kernel: string, enumeration: Enumeration, batch: number) => {
+    const animation: AnimationRecord = {
+      keyframes: keys,
+      frames: anim.frames,
+      fps: 30,
+      loop: ANIM_PATH.loop,
+      easing: ANIM_PATH.easing,
+      brightness: 'perFrame',
+      quality: 1,
+      batchFrames: batch,
+      output: 'png',
+      codec: null,
+      bitrate: null,
+    };
+    for (let i = 0; i < frames.length; i++) {
+      const { coeffs, view } = frames[i];
+      const frame: FrameRecord = { index: i, coeffs, view, exposure: DISPLAY.exposure, gamma: DISPLAY.gamma, countScale: 1, fixedMax: 0 };
+      const meta = metadataOf({ coeffs: coeffFrames[0], degree: anim.degree, pinned, kernel, enumeration, view: frames[0].view, animation, frame });
+      await writePng(`${OUT}/${variant}/${anim.name}-f${i}.png`, r.frames[i], metadataTexts(meta));
+    }
+  };
+  const base = await renderCold(anim, frames);
+  await save(ANIM_BASELINE, base, 'perPoly', 'plain', 1);
+  rows.push({ scene: anim.name, variant: ANIM_BASELINE, ms: base.ms.toFixed(0), unconverged: String(base.unconverged) });
+  expect.soft(base.unconverged, `${anim.name} ${ANIM_BASELINE}: unconverged polynomial-frames`).toBeLessThanOrEqual(LIMITS.unconverged * polys);
+  for (const v of ANIM_VARIANTS) {
+    const r = await renderWarm(anim, frames, v);
+    const enumeration = effectiveEnumeration(coeffFrames, pinned, v.enumeration).mode;
+    await save(v.name, r, framesKernel(v.kernel), enumeration, Math.min(frames.length, batchFrames(W * H * 16, device.limits)));
+    const row: Row = { scene: anim.name, variant: v.name, ms: r.ms.toFixed(0), unconverged: String(r.unconverged), note: 'worst frame' };
+    rows.push(row);
+    expect(r.frames).toHaveLength(frames.length);
+    expect.soft(r.unconverged, `${anim.name} ${v.name}: unconverged polynomial-frames`).toBeLessThanOrEqual(LIMITS.unconverged * polys);
+    for (let i = 0; i < frames.length; i++) {
+      const d = compare(r.frames[i], base.frames[i], frames[i].view);
+      await writePng(`${OUT}/diff/${v.name}/${anim.name}-f${i}.png`, d.heat);
+      expect.soft(d.mean, `${anim.name} ${v.name} frame ${i}: mean |diff|`).toBeLessThanOrEqual(LIMITS.mean);
+      expect.soft(d.centre, `${anim.name} ${v.name} frame ${i}: lit-pixel difference within |z| < 0.25`).toBeLessThanOrEqual(LIMITS.centre);
+      expect.soft(d.block, `${anim.name} ${v.name} frame ${i}: lit-pixel difference in a 32x32 block`).toBeLessThanOrEqual(LIMITS.block);
+      const w = row.diff;
+      row.diff = w ? { pct: Math.max(w.pct, d.pct), mean: Math.max(w.mean, d.mean), centre: Math.max(w.centre, d.centre), block: Math.max(w.block, d.block), heat: w.heat } : d;
+    }
   }
   expect(errors).toEqual([]);
 });

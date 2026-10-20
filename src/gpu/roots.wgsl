@@ -50,7 +50,7 @@ fn finite2(v: vec2f) -> bool {
   return all(e != vec2u(0x7f800000u));
 }
 
-const FRAME_VIEWS: u32 = 128u;   // = MAX_COEFFS * MAX_BATCH_FRAMES in engine.ts: per-frame views follow the coefficients
+const FRAME_VIEWS: u32 = 128u;   // = MAX_COEFFS * MAX_BATCH_FRAMES in engine.ts, = coop.wgsl: per-frame views follow the coefficients
 // Layout of `en`, = core/reciprocal.ts: entry {threadStart, region, 0, 0, start[MAX_SLOTS], stride[MAX_SLOTS]};
 // region {slots, partner, pmap, 0, then per slot radix, table, p, q}; tables of packed digits x | y << 8.
 const MAX_SLOTS: u32 = MAX_DEG + 1u;

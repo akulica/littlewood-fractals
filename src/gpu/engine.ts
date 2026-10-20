@@ -25,7 +25,7 @@ export const TOL = 1e-5; // backward-error stop (measured: 1e-6..3e-5 all conver
 const PARAMS_BYTES = 64;
 const VIEW_BYTES = 176; // = struct View in display.wgsl: 12 scalars + 4 pad, then 8 vec4f of ring centres
 const MAX_RINGS = 16; // = MAX_RINGS in display.wgsl
-const FRAME_VIEWS = MAX_COEFFS * MAX_BATCH_FRAMES; // = FRAME_VIEWS in roots.wgsl: vec2f index of the per-frame views
+const FRAME_VIEWS = MAX_COEFFS * MAX_BATCH_FRAMES; // = FRAME_VIEWS in roots.wgsl and coop.wgsl: vec2f index of the per-frame views
 const REDUCE_GROUPS = 256;
 const CAL_DEGREE = 20; // calibration workload: 2^18 Littlewood polynomials of degree 20 (~15-70 ms per run)
 const CAL_POLYS = 1 << 18;
@@ -69,7 +69,11 @@ export interface DisplayParams {
   rings?: RingOverlay;
 }
 
-/** One splatFrames batch: up to MAX_BATCH_FRAMES coefficient sets of equal size k, solved per polynomial in turn. */
+/** Animation kernel of each splat kernel: roots.wgsl splatFrames (perPoly) or coop.wgsl splatFramesCoop (coop). */
+export type FramesKernel = 'splatFrames' | 'splatFramesCoop';
+export const framesKernel = (kernel: Kernel): FramesKernel => (kernel === 'coop' ? 'splatFramesCoop' : 'splatFrames');
+
+/** One splatFrames / splatFramesCoop batch: up to MAX_BATCH_FRAMES coefficient sets of equal size k, solved per polynomial in turn. */
 export interface FramesParams {
   frames: Complex[][];
   degree: number;
@@ -90,7 +94,8 @@ export class Engine {
   readonly device: GPUDevice;
   width = 0;
   height = 0;
-  /** Which splat kernel encodeCompute dispatches. calibrate() sets it to the faster one for this GPU. */
+  /** Which splat kernel encodeCompute dispatches. calibrate() sets it to the faster one for this GPU. setFrames()
+   * reads it too: perPoly batches run splatFrames, coop batches splatFramesCoop. */
   kernel: Kernel = 'perPoly';
   /** Enumeration order of the polynomials; read by setParams/setFrames (the next accumulation). */
   ordering: Ordering = 'golden';
@@ -101,7 +106,9 @@ export class Engine {
   private readonly coopPipe: GPUComputePipeline;
   private readonly debugPipe: GPUComputePipeline;
   private readonly rootsModule: GPUShaderModule;
-  private framesPipe: GPUComputePipeline | null = null; // built on first use: exports and the live view never need it
+  private readonly coopModule: GPUShaderModule;
+  // Built on first use: exports and the live view never need them.
+  private readonly framesPipes: Partial<Record<FramesKernel, GPUComputePipeline>> = {};
   private readonly reducePipe: GPUComputePipeline;
   private readonly renderPipe: GPURenderPipeline;
   private readonly paramsBuf: GPUBuffer;
@@ -116,9 +123,10 @@ export class Engine {
   private reduceBG: GPUBindGroup | null = null;
   private renderBG: GPUBindGroup | null = null;
   private params: FractalParams | null = null;
-  private frameCount = 0; // > 0: batch mode (setFrames), encodeCompute dispatches splatFrames into framesTarget
+  private frameCount = 0; // > 0: batch mode (setFrames), encodeCompute dispatches framesKernel into framesTarget
   private framesTarget: GPUBuffer | null = null;
   private framesBG: GPUBindGroup | null = null;
+  private framesUsed: FramesKernel | null = null;
   private plan: EnumPlan | null = null;
   private cursor: EnumCursor | null = null;
   private needsClear = true;
@@ -131,6 +139,7 @@ export class Engine {
     this.splatPipe = device.createComputePipeline({ layout: 'auto', compute: { module: roots, entryPoint: 'splat' } });
     this.debugPipe = device.createComputePipeline({ layout: 'auto', compute: { module: roots, entryPoint: 'debugRoots' } });
     const coop = device.createShaderModule({ label: 'coop', code: coopSrc });
+    this.coopModule = coop;
     this.coopPipe = device.createComputePipeline({ layout: 'auto', compute: { module: coop, entryPoint: 'splatCoop' } });
     this.reducePipe = device.createComputePipeline({ layout: 'auto', compute: { module: display, entryPoint: 'reduceMax' } });
     this.renderPipe = device.createRenderPipeline({
@@ -162,6 +171,11 @@ export class Engine {
   /** Solves so far, of all solves: the unit of encodeCompute's budget. */
   get work(): { done: bigint; total: bigint } {
     return { done: this.cursor?.solved ?? 0n, total: this.plan?.solves ?? 0n };
+  }
+
+  /** Animation kernel of the current setFrames batch, null outside batch mode. */
+  get activeFramesKernel(): FramesKernel | null {
+    return this.framesUsed;
   }
 
   /** Enumeration actually in use (a pinned set without a usable group table runs plain). */
@@ -219,7 +233,8 @@ export class Engine {
   /**
    * Batch mode for animation: frame f of `p.frames` accumulates into bytes [f, f+1) * W*H*16 of `target`
    * (STORAGE | COPY_DST usage, at least frames * W*H*16 bytes) through the warm-starting splatFrames kernel; the
-   * engine's own histogram is untouched (loadHistogram() copies a slice into it for display). Restarts accumulation;
+   * engine's own histogram is untouched (loadHistogram() copies a slice into it for display). `kernel` picks the
+   * layout: perPoly runs splatFrames (a thread per polynomial), coop splatFramesCoop (a thread per root). Restarts accumulation;
    * every encodeCompute chunk then covers the same polynomials in all frames. Stays in effect until setParams() or
    * resize(). Pinned + reciprocal needs every frame to give the same group table; otherwise the batch runs plain.
    */
@@ -237,11 +252,16 @@ export class Engine {
     this.device.queue.writeBuffer(this.coeffBuf, 0, new Float32Array(p.frames.flatMap((f) => f.flatMap((c) => [c.re, c.im]))));
     const views = p.views ?? p.frames.map(() => p.view);
     this.device.queue.writeBuffer(this.coeffBuf, FRAME_VIEWS * 8, new Float32Array(views.flatMap((v) => [v.cx, v.cy, v.pxPerUnit, 0])));
-    this.framesPipe ??= this.device.createComputePipeline({ layout: 'auto', compute: { module: this.rootsModule, entryPoint: 'splatFrames' } });
+    const used = framesKernel(this.kernel);
+    const pipe = (this.framesPipes[used] ??= this.device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: used === 'splatFramesCoop' ? this.coopModule : this.rootsModule, entryPoint: used },
+    }));
     this.frameCount = n;
     this.framesTarget = target;
+    this.framesUsed = used;
     this.framesBG = this.device.createBindGroup({
-      layout: this.framesPipe.getBindGroupLayout(0),
+      layout: pipe.getBindGroupLayout(0),
       entries: [this.paramsBuf, this.coeffBuf, this.enumBuf, target, this.statsBuf].map((buffer, binding) => ({ binding, resource: { buffer } })),
     });
   }
@@ -268,11 +288,18 @@ export class Engine {
     const entries = this.cursor.next(count);
     this.device.queue.writeBuffer(this.enumBuf, 0, packChunk(entries));
     const pass = enc.beginComputePass();
-    if (this.framesBG) {
-      // perPoly only: a thread keeps its roots in registers from frame to frame (coop has no warm path, see plan).
+    if (this.framesBG && this.framesUsed === 'splatFramesCoop') {
+      // A workgroup keeps its polynomials' roots in registers and shared memory from frame to frame.
+      const grid = coopGrid(count, this.params.degree);
+      this.writeParams(count, 0, entries.length);
+      pass.setPipeline(this.framesPipes.splatFramesCoop!);
+      pass.setBindGroup(0, this.framesBG);
+      pass.dispatchWorkgroups(grid.x, grid.y);
+    } else if (this.framesBG) {
+      // A thread keeps its roots in registers from frame to frame.
       const grid = dispatchGrid(count);
       this.writeParams(count, grid.strideX, entries.length);
-      pass.setPipeline(this.framesPipe!);
+      pass.setPipeline(this.framesPipes.splatFrames!);
       pass.setBindGroup(0, this.framesBG);
       pass.dispatchWorkgroups(grid.x, grid.y);
     } else if (this.kernel === 'coop') {
@@ -438,6 +465,7 @@ export class Engine {
     this.frameCount = 0;
     this.framesTarget = null;
     this.framesBG = null;
+    this.framesUsed = null;
   }
 
   private async readBuffer(src: GPUBuffer, bytes: number, enc = this.device.createCommandEncoder()): Promise<ArrayBuffer> {
