@@ -32,6 +32,7 @@ body.dropping #view { outline: 3px dashed #9cf; outline-offset: -6px; }
 #unverified > p { margin-bottom: 0; }
 #unverified > output[hidden] { display: none; }
 #panel .warn { color: #fc6; overflow-wrap: anywhere; }
+#framesHint > button { display: block; margin-top: 3px; }
 #keyCount { font-weight: normal; color: #aaa; }
 #keyList { margin: 0; padding-left: 22px; max-height: 110px; overflow-y: auto; }
 #keyList li { cursor: pointer; }

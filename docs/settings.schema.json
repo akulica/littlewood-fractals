@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://littlewood-fractals.local/settings.schema.json",
+  "title": "Littlewood fractals settings (schema littlewood-fractals/1)",
+  "description": "Settings / reproduction metadata read by Load… (src/core/metadata.ts parseMetadata is authoritative). See docs/settings-format.md. Two rules JSON Schema cannot express: every animation.keyframes[i].coeffs has exactly as many entries as fractal.coeffs, and an animation needs at least two keyframes to render. Unknown properties are ignored by the app.",
+  "type": "object",
+  "required": ["schema", "kind", "build", "environment", "fractal", "screen", "display"],
+  "properties": {
+    "schema": { "const": "littlewood-fractals/1" },
+    "kind": { "enum": ["settings", "image", "animation", "frame"], "description": "Generators: \"settings\"." },
+    "build": {
+      "type": "object",
+      "description": "Informational (shown in a Load note when it differs from the running build).",
+      "required": ["version", "commit", "builtAt"],
+      "properties": { "version": { "type": "string" }, "commit": { "type": "string" }, "builtAt": { "type": "string" } }
+    },
+    "environment": {
+      "type": "object",
+      "description": "Informational (shown in a Load note when the GPU differs).",
+      "required": ["gpu", "userAgent", "timestamp"],
+      "properties": {
+        "gpu": {
+          "type": "object",
+          "required": ["vendor", "architecture", "device", "description"],
+          "properties": {
+            "vendor": { "type": "string" },
+            "architecture": { "type": "string" },
+            "device": { "type": "string" },
+            "description": { "type": "string" }
+          }
+        },
+        "userAgent": { "type": "string" },
+        "timestamp": { "type": "string", "description": "ISO 8601" }
+      }
+    },
+    "fractal": {
+      "type": "object",
+      "required": ["coeffs", "degree", "maxIter", "tol", "pinned", "ordering", "kernel"],
+      "properties": {
+        "coeffs": { "$ref": "#/$defs/coeffList", "description": "Coefficient set shown in the live view after Load." },
+        "degree": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "maxIter": { "type": "integer", "minimum": 1, "maximum": 65536, "description": "Ignored by Load (the app uses 32)." },
+        "tol": { "type": "number", "exclusiveMinimum": 0, "description": "Ignored by Load (the app uses 1e-5)." },
+        "pinned": { "type": "boolean", "description": "Ignored by Load (decided per render)." },
+        "ordering": { "type": "string", "description": "Ignored by Load. Use \"golden\"." },
+        "kernel": { "type": "string", "description": "Ignored by Load (auto picks per GPU). Use \"perPoly\"." },
+        "enumeration": { "enum": ["reciprocal", "plain"], "description": "Optional; absent = keep the app's current setting." }
+      }
+    },
+    "unverified": {
+      "type": "object",
+      "description": "Optional; absent = every unverified option off. These options fail the image A/B tests.",
+      "required": ["skipOverflowGuard"],
+      "properties": { "skipOverflowGuard": { "type": "boolean" } }
+    },
+    "screen": {
+      "description": "The live view: Load shows the rectangle width/pxPerUnit × height/pxPerUnit around (cx, cy), fitted (contain) to the window. Also the view of every frame when no keyframe carries a view.",
+      "allOf": [
+        { "$ref": "#/$defs/viewRecord" },
+        { "type": "object", "required": ["dpr"], "properties": { "dpr": { "type": "number", "exclusiveMinimum": 0, "description": "Ignored by Load. Use 1." } } }
+      ]
+    },
+    "output": {
+      "$ref": "#/$defs/viewRecord",
+      "description": "Optional. Load takes only width and height (the Save PNG / animation size); cx, cy, pxPerUnit are informational."
+    },
+    "display": {
+      "type": "object",
+      "required": ["colorMode", "exposure", "gamma", "countScale", "rings"],
+      "properties": {
+        "colorMode": { "enum": [0, 1], "description": "1 = hue by low-order coefficients, 0 = density (inferno)." },
+        "exposure": { "type": "number", "exclusiveMinimum": 0, "description": "The slider clamps to 0.2..3 on Load." },
+        "gamma": { "type": "number", "exclusiveMinimum": 0, "description": "The slider clamps to 0.2..1.5 on Load." },
+        "countScale": { "type": "number", "exclusiveMinimum": 0, "description": "Ignored by Load. Use 1." },
+        "rings": { "type": "boolean", "description": "Draw coefficient rings into exports." },
+        "fixedMax": { "type": "number", "minimum": 0, "description": "Optional, ignored by Load." }
+      }
+    },
+    "animation": {
+      "type": "object",
+      "required": ["keyframes", "frames", "fps", "loop", "easing", "brightness", "quality", "batchFrames", "output", "codec", "bitrate"],
+      "properties": {
+        "keyframes": { "type": "array", "items": { "$ref": "#/$defs/keyframe" }, "description": "≥ 2 to render. Equal time per keyframe." },
+        "frames": { "type": "integer", "minimum": 1, "maximum": 100000, "description": "The app renders at least 2." },
+        "fps": { "type": "integer", "minimum": 1, "maximum": 120 },
+        "loop": { "type": "boolean" },
+        "easing": { "enum": ["smooth", "linear"] },
+        "brightness": { "enum": ["locked", "frame0", "perFrame"] },
+        "quality": { "enum": [1, 0.5, 0.25, 0.1], "description": "Fraction of the polynomials solved per frame (1 = final)." },
+        "batchFrames": { "type": "integer", "minimum": 1, "maximum": 1024, "description": "Ignored by Load (recomputed). Use 8." },
+        "output": { "type": "string", "description": "\"mp4\", \"mp4+png\" or \"png\"; anything else (or PNG output in a browser that cannot write folders) keeps the current choice." },
+        "codec": { "type": ["string", "null"], "description": "Ignored by Load. Must be present: \"avc\" or null." },
+        "bitrate": { "oneOf": [{ "type": "number", "exclusiveMinimum": 0 }, { "type": "null" }], "description": "Ignored by Load. Must be present: null is fine." }
+      }
+    },
+    "frame": { "type": "object", "description": "Written into PNG frames by the app. Generators: omit." }
+  },
+  "$defs": {
+    "complex": {
+      "type": "object",
+      "required": ["re", "im"],
+      "properties": { "re": { "type": "number" }, "im": { "type": "number" } }
+    },
+    "coeffList": { "type": "array", "items": { "$ref": "#/$defs/complex" }, "minItems": 1, "maxItems": 16 },
+    "viewRecord": {
+      "type": "object",
+      "required": ["cx", "cy", "pxPerUnit", "width", "height"],
+      "properties": {
+        "cx": { "type": "number", "description": "Real part of the centre." },
+        "cy": { "type": "number", "description": "Imaginary part of the centre (up is +)." },
+        "pxPerUnit": { "type": "number", "exclusiveMinimum": 0 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 65536 }
+      }
+    },
+    "viewRect": {
+      "type": "object",
+      "description": "Visible world rectangle: centre and half extents in complex-plane units.",
+      "required": ["cx", "cy", "halfW", "halfH"],
+      "properties": {
+        "cx": { "type": "number" },
+        "cy": { "type": "number" },
+        "halfW": { "type": "number", "exclusiveMinimum": 0 },
+        "halfH": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "keyframe": {
+      "type": "object",
+      "required": ["coeffs"],
+      "properties": {
+        "coeffs": { "$ref": "#/$defs/coeffList", "description": "Same length as fractal.coeffs." },
+        "view": { "$ref": "#/$defs/viewRect" },
+        "exposure": { "type": "number", "exclusiveMinimum": 0 },
+        "gamma": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "dependentRequired": { "exposure": ["gamma"], "gamma": ["exposure"] }
+    }
+  }
+}

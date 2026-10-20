@@ -68,6 +68,10 @@
           <label class="check"><input id="loop" type="checkbox" /> Loop back to start</label>
         </div>
         <label>Frames <input id="frames" type="number" min="2" max="100000" value="120" /></label>
+        <div id="framesHint" class="warn" hidden>
+          <span id="framesHintText"></span>
+          <button id="fitFrames" type="button" title="Set Frames to the smallest count that puts a frame on or next to every keyframe (linear easing: one frame per keyframe, exactly on each)">Fit frames to keyframes</button>
+        </div>
         <label>FPS <input id="fps" type="number" min="1" max="120" value="30" /></label>
         <label>Easing
           <select id="easing">

@@ -3,10 +3,12 @@ import { BUILD_INFO } from '../buildInfo';
 import {
   batchFrames,
   frameTime,
+  framesToShowKeyframes,
   keyframeTime,
   pinnable,
   stateAt,
   statesFor,
+  uncoveredKeyframes,
   type Brightness,
   type Easing,
   type Keyframe,
@@ -78,6 +80,9 @@ const loopInput = el<HTMLInputElement>('loop');
 const framesInput = el<HTMLInputElement>('frames');
 const fpsInput = el<HTMLInputElement>('fps');
 const easingSelect = el<HTMLSelectElement>('easing');
+const framesHint = el<HTMLDivElement>('framesHint');
+const framesHintText = el<HTMLSpanElement>('framesHintText');
+const fitFramesButton = el<HTMLButtonElement>('fitFrames');
 const brightnessSelect = el<HTMLSelectElement>('brightness');
 const qualitySelect = el<HTMLSelectElement>('quality');
 const outputSelect = el<HTMLSelectElement>('output');
@@ -513,6 +518,15 @@ async function start(): Promise<void> {
     animStatus.textContent = text;
     animStatus.classList.toggle('error', isError);
   }
+  /** Warns when frames step over keyframes (fewer frames than keyframes, or smooth easing's faster middle). */
+  function updateFramesHint(): void {
+    const missed = uncoveredKeyframes(keys.length, frameCount(), pathOpts());
+    framesHint.hidden = missed === 0;
+    if (missed === 0) return;
+    const fewer = frameCount() < keys.length ? `fewer frames than keyframes (${frameCount()} < ${keys.length}): ` : '';
+    const smooth = !fewer && easingSelect.value === 'smooth' ? ' (smooth easing moves 1.5× faster mid-timeline)' : '';
+    framesHintText.textContent = `${fewer}${missed} of ${keys.length} keyframes fall between frames and won't be shown exactly${smooth}`;
+  }
   function showCoeffs(list: Complex[]): void {
     coeffs = list;
     coeffInput.value = coeffs.map(formatComplex).join(', ');
@@ -570,6 +584,7 @@ async function start(): Promise<void> {
     timeline.disabled = !usable;
     playButton.disabled = !usable;
     drawKeyPaths();
+    updateFramesHint();
   }
 
   addKeyButton.addEventListener('click', () => {
@@ -587,7 +602,16 @@ async function start(): Promise<void> {
     stopPlay();
     updateKeys();
   });
-  loopInput.addEventListener('change', () => drawKeyPaths());
+  loopInput.addEventListener('change', () => {
+    drawKeyPaths();
+    updateFramesHint();
+  });
+  framesInput.addEventListener('input', updateFramesHint);
+  easingSelect.addEventListener('change', updateFramesHint);
+  fitFramesButton.addEventListener('click', () => {
+    framesInput.value = String(framesToShowKeyframes(keys.length, pathOpts()));
+    updateFramesHint();
+  });
 
   // Scrubbing is an interaction: the live view renders the full-degree golden sample of each position.
   timeline.addEventListener('input', () => {

@@ -1,0 +1,53 @@
+{
+  "schema": "littlewood-fractals/1",
+  "kind": "settings",
+  "build": { "version": "external", "commit": "my-generator 1.0", "builtAt": "2026-10-20T12:00:00Z" },
+  "environment": {
+    "gpu": { "vendor": "", "architecture": "", "device": "", "description": "" },
+    "userAgent": "my-generator 1.0",
+    "timestamp": "2026-10-20T12:00:00Z"
+  },
+  "fractal": {
+    "coeffs": [{ "re": 1, "im": 0 }, { "re": -1, "im": 0 }],
+    "degree": 20,
+    "maxIter": 32,
+    "tol": 1e-5,
+    "pinned": false,
+    "ordering": "golden",
+    "kernel": "perPoly",
+    "enumeration": "reciprocal"
+  },
+  "screen": { "cx": 0, "cy": 0, "pxPerUnit": 270, "width": 1920, "height": 1080, "dpr": 1 },
+  "output": { "cx": 0, "cy": 0, "pxPerUnit": 270, "width": 1920, "height": 1080 },
+  "display": { "colorMode": 1, "exposure": 1, "gamma": 0.6, "countScale": 1, "rings": false },
+  "animation": {
+    "keyframes": [
+      {
+        "coeffs": [{ "re": 1, "im": 0 }, { "re": -1, "im": 0 }],
+        "view": { "cx": 0, "cy": 0, "halfW": 3.5555555555555554, "halfH": 2 },
+        "exposure": 1,
+        "gamma": 0.6
+      },
+      {
+        "coeffs": [{ "re": 1, "im": 0 }, { "re": -1, "im": 0 }],
+        "view": { "cx": 0.6, "cy": 0.8, "halfW": 0.35555555555555557, "halfH": 0.2 },
+        "exposure": 1.4,
+        "gamma": 0.6
+      },
+      {
+        "coeffs": [{ "re": 1, "im": 0 }, { "re": -0.4, "im": 0.75 }],
+        "view": { "cx": 0.6, "cy": 0.8, "halfW": 0.35555555555555557, "halfH": 0.2 }
+      }
+    ],
+    "frames": 241,
+    "fps": 30,
+    "loop": false,
+    "easing": "linear",
+    "brightness": "locked",
+    "quality": 1,
+    "batchFrames": 8,
+    "output": "mp4",
+    "codec": "avc",
+    "bitrate": null
+  }
+}

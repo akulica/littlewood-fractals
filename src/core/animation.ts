@@ -163,6 +163,29 @@ export function frameTime(i: number, frameCount: number, loop: boolean): number 
   return frameCount > 1 ? i / (frameCount - 1) : 0;
 }
 
+/**
+ * Keyframes no frame lands on or next to: keyframe i counts as shown when some frame's path position rounds to i
+ * (the frame is within half a keyframe of it). With fewer frames than keyframes, or with smooth easing (it moves
+ * 1.5x faster than linear mid-timeline), frames step over keyframes, and a keyframe-only detail (a sharp turn, a
+ * one-keyframe exposure spike) can vanish from the video.
+ */
+export function uncoveredKeyframes(keyCount: number, frameCount: number, opts: PathOptions): number {
+  if (keyCount < 2 || frameCount < 1) return 0;
+  const shown = new Set<number>();
+  for (let i = 0; i < frameCount; i++) shown.add(Math.round(pathPosition(frameTime(i, frameCount, opts.loop), keyCount, opts)) % keyCount);
+  return keyCount - shown.size;
+}
+
+/**
+ * The smallest frame count ≥ the keyframe count that shows every keyframe (uncoveredKeyframes = 0), at most
+ * maxFrames. Linear: exactly the keyframe count, and every keyframe then falls exactly on a frame. Smooth: about
+ * 1.5x the keyframe count, and frames land near (not on) the inner keyframes.
+ */
+export function framesToShowKeyframes(keyCount: number, opts: PathOptions, maxFrames = 100_000): number {
+  for (let n = Math.max(2, keyCount); n < maxFrames; n++) if (uncoveredKeyframes(keyCount, n, opts) === 0) return n;
+  return maxFrames;
+}
+
 function checkFrameCount(frameCount: number): void {
   if (!Number.isInteger(frameCount) || frameCount < 1) throw new RangeError('frame count must be a whole number ≥ 1');
 }

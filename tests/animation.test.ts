@@ -4,9 +4,11 @@ import {
   batchFrames,
   frameTime,
   framesFor,
+  framesToShowKeyframes,
   interpolateAt,
   keyframeTime,
   pinnable,
+  uncoveredKeyframes,
   videoSizeError,
   type CoeffSet,
 } from '../src/core/animation';
@@ -63,6 +65,36 @@ describe('keyframeTime', () => {
       }
     }
     expect(keyframeTime(1, 3, linear)).toBe(0.5);
+  });
+});
+
+describe('uncoveredKeyframes / framesToShowKeyframes', () => {
+  const opts = (easing: 'linear' | 'smooth', loop: boolean) => ({ easing, loop });
+  it('120 keyframes in 60 frames: every other keyframe has no frame (linear), two thirds mid-timeline (smooth)', () => {
+    expect(uncoveredKeyframes(120, 60, opts('linear', false))).toBe(60);
+    expect(uncoveredKeyframes(120, 60, opts('linear', true))).toBe(60);
+    expect(uncoveredKeyframes(120, 60, opts('smooth', false))).toBe(66);
+  });
+  it('linear: one frame per keyframe lands exactly on every keyframe', () => {
+    for (const loop of [false, true]) {
+      expect(uncoveredKeyframes(120, 120, opts('linear', loop))).toBe(0);
+      expect(framesToShowKeyframes(120, opts('linear', loop))).toBe(120);
+      const keys = [A, B, C, A, B];
+      const frames = framesFor(keys, 5, opts('linear', loop));
+      frames.forEach((f, i) => expect(f).toEqual(keys[i])); // bit-exact
+    }
+  });
+  it('smooth easing needs about 1.5x as many frames (it moves 1.5x faster mid-timeline)', () => {
+    expect(uncoveredKeyframes(120, 120, opts('smooth', false))).toBeGreaterThan(0);
+    const n = framesToShowKeyframes(120, opts('smooth', false));
+    expect(n).toBe(174);
+    expect(uncoveredKeyframes(120, n, opts('smooth', false))).toBe(0);
+    expect(uncoveredKeyframes(120, n - 1, opts('smooth', false))).toBeGreaterThan(0);
+  });
+  it('two keyframes are always shown (first and last frame)', () => {
+    expect(uncoveredKeyframes(2, 2, opts('smooth', false))).toBe(0);
+    expect(framesToShowKeyframes(2, opts('smooth', true))).toBe(2);
+    expect(uncoveredKeyframes(1, 10, opts('linear', false))).toBe(0);
   });
 });
 
