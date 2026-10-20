@@ -50,6 +50,7 @@ const degreeInput = el<HTMLInputElement>('degree');
 const coeffInput = el<HTMLInputElement>('coeffs');
 const colorSelect = el<HTMLSelectElement>('color');
 const kernelSelect = el<HTMLSelectElement>('kernel');
+const enumerationSelect = el<HTMLSelectElement>('enumeration');
 const exposureInput = el<HTMLInputElement>('exposure');
 const gammaInput = el<HTMLInputElement>('gamma');
 const statusOut = el<HTMLOutputElement>('status');
@@ -322,6 +323,12 @@ async function start(): Promise<void> {
     engine.kernel = kernelSelect.value === 'auto' ? calibration.kernel : (kernelSelect.value as Kernel);
     restart(true); // re-render from scratch so the status line times the chosen kernel
   });
+  // Live view, Save PNG and animations all read engine.enumeration.
+  engine.enumeration = enumerationSelect.value as Enumeration;
+  enumerationSelect.addEventListener('change', () => {
+    engine.enumeration = enumerationSelect.value as Enumeration;
+    restart(true);
+  });
 
   function updateStatus(): void {
     const { done, total } = engine.progress;
@@ -331,7 +338,7 @@ async function start(): Promise<void> {
     const kernelNote = kernelSelect.value === 'auto' ? ` (auto: coop/perPoly = ${(calibration.coopMs / calibration.perPolyMs).toFixed(2)})` : '';
     statusOut.textContent =
       `degree ${engine.degree}${sampled} · ${coeffs.length} coefficients\n` +
-      `kernel ${engine.kernel}${kernelNote}\n` +
+      `kernel ${engine.kernel}${kernelNote} · ${engine.activeEnumeration ?? engine.enumeration}\n` +
       `${pct.toFixed(2)} % of ${total.toLocaleString()} polynomials\n` +
       `${(rootsPerSec / 1e6).toFixed(1)} M roots/s` +
       (done < total ? ` · ~${fmtTime(secondsLeft)} left` : ' · done');
@@ -534,7 +541,9 @@ async function start(): Promise<void> {
           if (key.exposure !== undefined && key.gamma !== undefined) setExposureGamma(key.exposure, key.gamma);
           showCoeffs(key.coeffs);
         });
-        li.append(marks, label, remove);
+        const row = document.createElement('div'); // flex row inside the li: display: flex on the li would drop its number
+        row.append(marks, label, remove);
+        li.append(row);
         return li;
       }),
     );
@@ -792,6 +801,9 @@ async function start(): Promise<void> {
   function applyLoaded(m: Metadata): void {
     const st = stateFromMetadata(m);
     stopPlay();
+    // Files made before the Enumeration option carry none: the current setting stays (loadFile notes it).
+    const enumerationChanged = st.enumeration !== undefined && st.enumeration !== engine.enumeration;
+    if (st.enumeration) enumerationSelect.value = engine.enumeration = st.enumeration;
     degree = st.degree;
     degreeInput.value = String(degree);
     // The recorded screen rectangle, fitted to this canvas: the same region whatever the window size or dpr.
@@ -818,6 +830,7 @@ async function start(): Promise<void> {
     }
     updateKeys();
     showCoeffs(st.coeffs);
+    if (enumerationChanged) restart(true); // showCoeffs restarts only when coefficients, degree or view changed
   }
 
   async function loadFile(file: File): Promise<void> {
@@ -827,6 +840,7 @@ async function start(): Promise<void> {
       const m = await readMetadata(file);
       applyLoaded(m);
       const notes = environmentNotes(m, { build: BUILD_INFO, gpu });
+      if (!m.fractal.enumeration) notes.push(`no enumeration recorded (made before the option existed): kept the current setting, ${engine.enumeration}`);
       setFileStatus(`loaded ${file.name}: ${describe(m)}${notes.map((n) => `\nnote: ${n}`).join('')}`);
     } catch (err) {
       setFileStatus(`could not load ${file.name}: ${err instanceof Error ? err.message : String(err)}`, true);

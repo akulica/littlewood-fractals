@@ -16,8 +16,9 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 ```bash
 npm install
 npm run dev       # http://localhost:5173  (WebGPU needs https:// or localhost)
-npm test          # 178 tests: pure logic + real-GPU tests via Dawn (no browser needed)
+npm test          # 186 tests: pure logic + real-GPU tests via Dawn (no browser needed)
 npm run bench     # throughput + kernel-variant benchmark on this machine's GPU
+npm run ab        # A/B image comparison of the enumeration/kernel variants (see *Checking an optimisation*)
 npm run build     # static site in dist/
 ```
 
@@ -33,6 +34,7 @@ npm run build     # static site in dist/
 | Pan / zoom | Drag the background / mouse wheel (zooms around the cursor) / **Zoom ±** / **Reset view** |
 | Colour | Hue by low-order coefficients (Egan's palette idea), or inferno density. Exposure and gamma apply instantly, without recomputing. |
 | Kernel | **auto** (default) times both GPU kernels at startup and keeps the faster one. The choice and the measured ratio are shown in the status line. You can also force either kernel. |
+| Enumeration | **reciprocal symmetry** (default, about 2× faster) solves one polynomial of each reversed pair and plots its roots `z` and the partner's `1/z`; **plain** solves every polynomial (the original path, for comparison). Same picture up to f32 rounding (see *Reciprocal symmetry*). Applies to the live view, Save PNG and animations; changing it restarts the accumulation. Recorded in every export and restored by Load. |
 | Save PNG | Type the width × height, then **Save PNG**. The image is re-rendered at that size (never upscaled), shows everything currently on screen (extra margin if the aspect differs), and matches the screen's brightness. Up to 64 M pixels (e.g. 8192×8192 or 16384×4096) within the GPU's limits. Live rendering pauses while it exports. The PNG carries the full settings (see *Reproduction metadata*). |
 | Coefficient rings | **Show coefficient rings** (off by default) draws the white handle rings into Save PNG and animation frames, sized like a screenshot of the screen at the export's resolution. In animations they follow each frame's coefficients. |
 | Save settings / Load | **Save settings (.json)** downloads the current state (coefficients, degree, view, display, export size, keyframes and animation settings). **Load…**, or dropping a file anywhere on the page, restores it from such a JSON, from a PNG saved by the app, or from a rendered MP4. |
@@ -77,7 +79,7 @@ Since the winner depends on the GPU, both kernels ship. At startup `Engine.calib
 
 ## Reciprocal symmetry
 
-- **Idea.** Reversing a coefficient string gives `z^d·p(1/z)`, again a polynomial of the set, with roots `1/z`. So each solve deposits its roots `z` and its partner's roots `1/z`, and only about half the polynomials are solved (`src/core/reciprocal.ts`, on by default; `Engine.enumeration = 'plain'` is the original path). The partner gets its own colour (the hue of the reversed digits). Its trimmed leading zeros become roots at 0, and the polynomial's own roots at 0 go to infinity.
+- **Idea.** Reversing a coefficient string gives `z^d·p(1/z)`, again a polynomial of the set, with roots `1/z`. So each solve deposits its roots `z` and its partner's roots `1/z`, and only about half the polynomials are solved (`src/core/reciprocal.ts`, on by default; **Enumeration: plain** in the panel, or `Engine.enumeration = 'plain'`, is the original path). The partner gets its own colour (the hue of the reversed digits). Its trimmed leading zeros become roots at 0, and the polynomial's own roots at 0 go to infinity.
 - **Exact cover.** Coefficient positions pair up from the outside, `(a_j, a_{d−j})`, and reversal swaps each pair. Region `R_j` fixes pairs `0..j−1` to `x = y`, takes one representative of each swapped couple at pair `j`, and leaves the rest free. The reversal of a string in `R_j` has the other member of the couple at pair `j`, so it lies in no region. Every string outside the regions is the reversal of exactly one string inside. The last region (all layer pairs fixed, at most 1/32 of the set) solves its strings alone.
 - **Pinned sets** (`c0·G`) reverse and then renormalise the leading coefficient. This maps the class `a_0 = c0·r` onto `r⁻¹`: classes with `r ≠ r⁻¹` are enumerated once with partners, and self-inverse classes are layered with the twisted pair map `(x, y) → (y·r, x·r)`.
 - **Even preview.** Each region has its own mixed-radix golden stride (coprime to every radix), and every chunk splits across all regions in proportion to their size. So any prefix is still an even sample of the whole set.
@@ -175,7 +177,22 @@ Reproducibility: the same parameters on the same GPU and driver give a bit-ident
 
 ## Load
 
-**Load…** or a file dropped on the page reads the metadata from a PNG (`iTXt` chunk), an MP4 (comment tag, read with mediabunny's `Input`) or a settings JSON, validates it and restores coefficients, degree, view, colour/exposure/gamma, rings, export size, keyframes and animation settings. The recorded screen rectangle is fitted to the current window, so the same region is shown whatever the window size. Unknown or newer schemas and malformed fields are refused with a message naming the problem (e.g. `fractal.degree must be a whole number in 1..32`). If the file was made by another build or on another GPU, a note says so (results may differ slightly, see above). A file without an animation keeps the current keyframes if they have the same number of coefficients. The kernel choice is not restored: auto picks the fastest one for this GPU.
+**Load…** or a file dropped on the page reads the metadata from a PNG (`iTXt` chunk), an MP4 (comment tag, read with mediabunny's `Input`) or a settings JSON, validates it and restores coefficients, degree, view, colour/exposure/gamma, rings, export size, keyframes and animation settings. The recorded screen rectangle is fitted to the current window, so the same region is shown whatever the window size. Unknown or newer schemas and malformed fields are refused with a message naming the problem (e.g. `fractal.degree must be a whole number in 1..32`). If the file was made by another build or on another GPU, a note says so (results may differ slightly, see above). A file without an animation keeps the current keyframes if they have the same number of coefficients. The enumeration is restored; files made before it was recorded keep the current setting, and a note says so. The kernel choice is not restored: auto picks the fastest one for this GPU.
+
+## Checking an optimisation
+
+`npm run ab` (`tests/gpu/ab.perf.ts`) renders the scenes in `tests/scenes/scenes.json` at 800×500: Littlewood (full and zoomed 4×), `{1, 0.01}` and `{1, 100}` (huge coefficient ratios: roots near 0 and far away), `{1, −0.4+0.75i}`, three complex coefficients, a set containing 0, and the 4th roots of unity. It renders each scene with every variant (enumeration plain/reciprocal × kernel perPoly/coop), writes `ab-out/<variant>/<scene>.png` with the full reproduction metadata, and compares every variant with the baseline `plain-perPoly`:
+- **px %:** pixels that differ at all (reported only; tone-mapping follows the densest pixel, so small shifts touch many pixels);
+- **mean:** mean |difference| per channel;
+- **centre:** lit-pixel difference within |z| < 0.25, where the old big-root bug drew its ring of dots;
+- **block:** largest lit-pixel difference in any 32×32 block, which catches localized artifacts anywhere;
+- unconverged polynomials.
+
+It prints a table, saves a heatmap per scene in `ab-out/diff/<variant>/` (red = lit only in the variant, cyan = only in the baseline), and fails above limits calibrated on the Arc 140T (in the file header: mean 0.5, centre 4, block 12, unconverged ≤ 0.01 %; measured 0.20, 0, 6, 0). Without the big-root fix it failed with centre 533 and block 417.
+
+To check a change against the previous build:
+1. Run `npm run ab` on the old build and copy its `ab-out/plain-perPoly` somewhere (e.g. `../ab-old`).
+2. Run it on the new build with `AB_REF_DIR=../ab-old npm run ab` (PowerShell: `$env:AB_REF_DIR='../ab-old'; npm run ab`). This adds a `ref` row per scene that compares this build's baseline with the old images, under the same limits. The metadata of the old images must describe the same scenes.
 
 ## How it works
 
@@ -183,10 +200,11 @@ Reproducibility: the same parameters on the same GPU and driver give a bit-ident
 - **Two kernels, picked per GPU.**
   - `roots.wgsl`: one polynomial per thread, Gauss–Seidel. Wins on Intel Arc.
   - `coop.wgsl`: one root per thread, floor(256/d) polynomials per workgroup, Jacobi sweeps through shared memory. Measured about 1.5× faster on AMD RDNA 4 (RX 9060 XT), and 1.2–1.3× slower on Intel Arc.
-- **Ehrlich–Aberth (`roots.wgsl`: one polynomial per GPU thread).** Cubic convergence, Gauss–Seidel updates, f32. Three guards make it robust:
+- **Ehrlich–Aberth (`roots.wgsl`: one polynomial per GPU thread).** Cubic convergence, Gauss–Seidel updates, f32. Four guards make it robust:
   - a backward-error stop, so multiple roots don't burn iterations;
   - clamping iterates to the Cauchy root bound;
-  - an integer inf/NaN check, because WGSL may assume floats are finite.
+  - an integer inf/NaN check, because WGSL may assume floats are finite;
+  - for |z| > 1, evaluating the reversed polynomial at `w = 1/z` (`p/p' = z·rev / (m·rev − w·rev')`), so no power of z overflows f32. Before this, big roots (e.g. `{1, 0.01}`: 0.01·z¹² + z¹¹ + … has a root near −100) made `|p|²` in the stop test `inf ≤ inf` and were accepted wherever they were. Off-screen in the plain path, but reciprocal symmetry drew their `1/z` as a ring of wrong dots around the origin. `tests/gpu/hugeRoots.test.ts` checks them against the f64 reference.
   - Accuracy against an f64 reference: better than 1e-4 for general sets, better than 1e-3 for Littlewood (clustered roots).
 - **No roots stored.** Each root is `atomicAdd`ed into a per-pixel histogram (count + RGB). A reduction finds the densest pixel, and a fragment shader tone-maps with a log curve.
 - **Enumeration.** Polynomial number n is decoded from its base-k digits (digit i picks `a_i`). The CPU sends each chunk's start digits as BigInt, so totals beyond 2⁵³ work. With reciprocal symmetry (the default) the same decoding runs per region, in that region's mixed radix (single digits and digit pairs, see *Reciprocal symmetry*).

@@ -165,19 +165,27 @@ fn polish(lo: u32, hi: u32) -> bool {
       if (((done >> j) & 1u) != 0u) { continue; }
       let zj = z[j];
       let az = length(zj);
-      var p = a[hi];
+      // Newton ratio p/p' and the backward-error stop. For |z| > 1 evaluate the reversed polynomial at w = 1/z
+      // instead (p(z) = z^m rev(w), so p/p' = z rev / (m rev - w rev')): every |w|^i <= 1, nothing overflows.
+      // Evaluating p directly overflowed f32 for big roots (|p|^2 in the stop test became inf <= inf) and
+      // accepted them wherever they were; invisible off-screen until reciprocal symmetry drew them as 1/z.
+      // One Horner loop either way (no SIMD divergence): x = z with a_hi..a_lo, or x = 1/z with a_lo..a_hi.
+      let flip = az > 1.0;
+      let x = select(zj, crecip(zj), flip);
+      let ax = select(az, 1.0 / az, flip);
+      var p = a[select(hi, lo, flip)];
       var dp = vec2f(0.0);
-      var bound = abs(p.x) + abs(p.y);           // ~ sum |a_i| |z|^i, for the backward-error stop test
-      for (var i = hi; i > lo; i--) {
-        let ai = a[i - 1u];
-        dp = cmul(dp, zj) + p;
-        p = cmul(p, zj) + ai;
-        bound = bound * az + abs(ai.x) + abs(ai.y);
+      var bound = abs(p.x) + abs(p.y);           // ~ sum |a_i| |x|^(power), for the backward-error stop
+      for (var t = 1u; t <= m; t++) {
+        let ai = a[select(hi - t, lo + t, flip)];
+        dp = cmul(dp, x) + p;
+        p = cmul(p, x) + ai;
+        bound = bound * ax + abs(ai.x) + abs(ai.y);
       }
+      let ratio = select(cdiv(p, dp), cdiv(cmul(zj, p), f32(m) * p - cmul(x, dp)), flip);
       // |p(z)| at f32 rounding level: z is as good as f32 can make it (also stops multiple roots,
       // which converge only linearly and would otherwise burn maxIter and stall the whole SIMD wave).
       if (dot(p, p) <= tol2 * bound * bound) { done |= 1u << j; continue; }
-      let ratio = cdiv(p, dp);
       var s = vec2f(0.0);
       for (var q = 0u; q < m; q++) {
         if (q != j) { s += crecip(zj - z[q]); }

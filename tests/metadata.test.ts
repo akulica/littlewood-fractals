@@ -107,6 +107,13 @@ describe('parseMetadata', () => {
     bad.fractal.enumeration = 'halved';
     expect(() => parseMetadata(JSON.stringify(bad))).toThrow(/fractal\.enumeration must be one of "reciprocal", "plain"/);
   });
+  it('Load restores the enumeration when recorded; without it the state leaves it out (the app keeps its own)', () => {
+    for (const enumeration of ['reciprocal', 'plain'] as const) {
+      const m = parseMetadata(JSON.stringify(buildMetadata({ ...input, fractal: { ...input.fractal, enumeration } })));
+      expect(stateFromMetadata(m).enumeration).toBe(enumeration);
+    }
+    expect('enumeration' in stateFromMetadata(parseMetadata(JSON.stringify(buildMetadata(input))))).toBe(false);
+  });
   it('explains what is wrong: not JSON, no schema, newer or unknown schema', () => {
     expect(() => parseMetadata('{oops')).toThrow(/not valid JSON/);
     expect(() => parseMetadata('{"degree": 3}')).toThrow(/no "schema"/);

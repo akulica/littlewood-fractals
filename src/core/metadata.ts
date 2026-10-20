@@ -49,8 +49,8 @@ export interface FractalRecord {
   ordering: string;
   /** Splat kernel actually used: perPoly or coop (f32 rounding differs between them). */
   kernel: string;
-  /** reciprocal (z and 1/z from one solve) or plain; f32 rounding differs slightly. Absent in files made before it
-   * existed (those were plain). */
+  /** reciprocal (z and 1/z from one solve) or plain, as actually used (a pinned set without a shared group table
+   * runs plain); f32 rounding differs slightly. Absent in files made before it existed (those were plain). */
   enumeration?: Enumeration;
 }
 
@@ -340,6 +340,8 @@ export interface LoadedState {
   /** The recorded screen's visible rectangle: fitted to the current canvas, it frames the same region. */
   view: ViewRect;
   display: { colorMode: 0 | 1; exposure: number; gamma: number; rings: boolean };
+  /** Absent in files made before the option existed: the app keeps its current setting. */
+  enumeration?: Enumeration;
   /** Export / animation size (Save PNG W x H). */
   size?: { width: number; height: number };
   animation?: { keyframes: Keyframe[]; frames: number; fps: number; loop: boolean; easing: Easing; brightness: Brightness; quality: number; output: string };
@@ -354,6 +356,7 @@ export function stateFromMetadata(m: Metadata): LoadedState {
     view: { cx: s.cx, cy: s.cy, halfW: s.width / 2 / s.pxPerUnit, halfH: s.height / 2 / s.pxPerUnit },
     display: { colorMode: m.display.colorMode, exposure: m.display.exposure, gamma: m.display.gamma, rings: m.display.rings },
   };
+  if (m.fractal.enumeration) state.enumeration = m.fractal.enumeration;
   if (m.output) state.size = { width: m.output.width, height: m.output.height };
   if (m.animation) {
     const { keyframes, frames, fps, loop, easing, brightness, quality, output } = m.animation;

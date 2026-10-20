@@ -1,0 +1,13 @@
+{
+  "comment": "A/B scenes for tests/gpu/ab.perf.ts. view.zoom 1 = the app's Reset view (radius 2 across the shorter side); pxPerUnit = zoom * min(W, H) / 4.",
+  "scenes": [
+    { "name": "ratio-0.01-d20", "coeffs": [{ "re": 1, "im": 0 }, { "re": 0.01, "im": 0 }], "degree": 20, "view": { "cx": 0, "cy": 0, "zoom": 1 } },
+    { "name": "littlewood-d20", "coeffs": [{ "re": 1, "im": 0 }, { "re": -1, "im": 0 }], "degree": 20, "view": { "cx": 0, "cy": 0, "zoom": 1 } },
+    { "name": "littlewood-zoom4", "coeffs": [{ "re": 1, "im": 0 }, { "re": -1, "im": 0 }], "degree": 20, "view": { "cx": 0.6, "cy": 0.8, "zoom": 4 } },
+    { "name": "two-complex-d20", "coeffs": [{ "re": 1, "im": 0 }, { "re": -0.4, "im": 0.75 }], "degree": 20, "view": { "cx": 0, "cy": 0, "zoom": 1 } },
+    { "name": "three-complex-d12", "coeffs": [{ "re": 1, "im": 0 }, { "re": -0.5, "im": 0.8 }, { "re": 0.3, "im": -1.1 }], "degree": 12, "view": { "cx": 0, "cy": 0, "zoom": 1 } },
+    { "name": "with-zero-d14", "coeffs": [{ "re": 0, "im": 0 }, { "re": 1, "im": 0 }, { "re": -1, "im": 0 }], "degree": 14, "view": { "cx": 0, "cy": 0, "zoom": 1 } },
+    { "name": "ratio-100-d16", "coeffs": [{ "re": 1, "im": 0 }, { "re": 100, "im": 0 }], "degree": 16, "view": { "cx": 0, "cy": 0, "zoom": 1 } },
+    { "name": "unity4-d12", "coeffs": [{ "re": 1, "im": 0 }, { "re": 0, "im": 1 }, { "re": -1, "im": 0 }, { "re": 0, "im": -1 }], "degree": 12, "view": { "cx": 0, "cy": 0, "zoom": 1 } }
+  ]
+}

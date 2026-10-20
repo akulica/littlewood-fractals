@@ -142,19 +142,23 @@ fn splatCoop(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index)
     var nz = z;
     if (!done) {
       let az = length(z);
-      var p = sa[abase + hi];
+      // |z| > 1: evaluate the reversed polynomial at w = 1/z (no f32 overflow; see roots.wgsl polish).
+      let flip = az > 1.0;
+      let x = select(z, crecip(z), flip);
+      let ax = select(az, 1.0 / az, flip);
+      var p = sa[abase + select(hi, lo, flip)];
       var dp = vec2f(0.0);
       var bound = abs(p.x) + abs(p.y);
-      for (var i = hi; i > lo; i--) {
-        let ai = sa[abase + i - 1u];
-        dp = cmul(dp, z) + p;
-        p = cmul(p, z) + ai;
-        bound = bound * az + abs(ai.x) + abs(ai.y);
+      for (var t = 1u; t <= m; t++) {
+        let ai = sa[abase + select(hi - t, lo + t, flip)];
+        dp = cmul(dp, x) + p;
+        p = cmul(p, x) + ai;
+        bound = bound * ax + abs(ai.x) + abs(ai.y);
       }
+      let ratio = select(cdiv(p, dp), cdiv(cmul(z, p), f32(m) * p - cmul(x, dp)), flip);
       if (dot(p, p) <= tol2 * bound * bound) {
         done = true;
       } else {
-        let ratio = cdiv(p, dp);
         var s = vec2f(0.0);
         for (var q = 0u; q < m; q++) {
           if (q != j) { s += crecip(z - sz[zbase + q]); }

@@ -1,4 +1,5 @@
 import { create, globals } from 'webgpu';
+import type { GpuInfo } from '../../src/core/metadata';
 import type { Engine } from '../../src/gpu/engine';
 
 Object.assign(globalThis, globals); // GPUBufferUsage, GPUMapMode, ... as in a browser
@@ -8,8 +9,9 @@ Object.assign(globalThis, globals); // GPUBufferUsage, GPUMapMode, ... as in a b
 // it only shows up once enough JS allocation triggers a GC between GPU calls).
 const gpu = create([]);
 
-/** Real GPU device through Dawn. `errors` collects uncaptured validation errors; tests assert it stays empty. */
-export async function nodeDevice(): Promise<{ device: GPUDevice; errors: string[]; adapterName: string }> {
+/** Real GPU device through Dawn. `errors` collects uncaptured validation errors; tests assert it stays empty.
+ * `gpu` is the adapter as export metadata records it (core/metadata GpuInfo). */
+export async function nodeDevice(): Promise<{ device: GPUDevice; errors: string[]; adapterName: string; gpu: GpuInfo }> {
   const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('dawn.node found no GPU adapter');
   const adapterName = `${adapter.info.vendor} ${adapter.info.architecture} ${adapter.info.description}`.trim();
@@ -21,7 +23,8 @@ export async function nodeDevice(): Promise<{ device: GPUDevice; errors: string[
   });
   const errors: string[] = [];
   device.addEventListener('uncapturederror', (e) => errors.push((e as GPUUncapturedErrorEvent).error.message));
-  return { device, errors, adapterName };
+  const { vendor, architecture, device: name, description } = adapter.info;
+  return { device, errors, adapterName, gpu: { vendor, architecture, device: name, description } };
 }
 
 /** Submit compute chunks until the engine reports nothing left, then wait for the GPU.

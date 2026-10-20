@@ -3,3 +3,6 @@ dist/
 
 # local agent notes (contain machine-specific paths/hosts)
 .hermes/
+
+# A/B image harness output (npm run ab)
+ab-out/

@@ -25,6 +25,12 @@
           <option value="coop">cooperative (thread per root)</option>
         </select>
       </label>
+      <label>Enumeration
+        <select id="enumeration" title="Reciprocal: solve one polynomial of each reversed pair and plot z and 1/z (same picture, about half the work). Plain: solve every polynomial.">
+          <option value="reciprocal">reciprocal symmetry (≈2× faster)</option>
+          <option value="plain">plain (every polynomial solved)</option>
+        </select>
+      </label>
       <!-- step="any": keyframed exposure/gamma are interpolated, and a stepped slider would round them -->
       <label>Exposure <input id="exposure" type="range" min="0.2" max="3" step="any" value="1" /></label>
       <label>Gamma <input id="gamma" type="range" min="0.2" max="1.5" step="any" value="0.6" /></label>

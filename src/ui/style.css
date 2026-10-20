@@ -3,10 +3,18 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color:
 #handles { position: fixed; inset: 0; pointer-events: none; }
 .handle { position: absolute; width: 18px; height: 18px; margin: -11px 0 0 -11px; border: 2px solid #fff; border-radius: 50%;
           pointer-events: auto; cursor: move; touch-action: none; box-shadow: 0 0 4px #000; }
-#panel { position: fixed; top: 8px; left: 8px; display: grid; gap: 6px; padding: 10px; max-width: 290px;
-         max-height: calc(100vh - 36px); overflow-y: auto; background: rgba(10, 10, 20, 0.8); border-radius: 8px; }
-#panel label { display: grid; grid-template-columns: 90px 1fr; align-items: center; gap: 6px; }
-#panel .row { display: flex; gap: 6px; }
+/* Fixed width, vertical scroll only: long option texts, keyframes and file names must never widen the panel
+   (the Animation section once pushed it sideways behind a horizontal scrollbar). Every grid/flex child may
+   shrink below its content (min-width: 0); text that cannot wrap is ellipsized. */
+#panel { position: fixed; top: 8px; left: 8px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 10px;
+         width: 290px; max-width: calc(100vw - 36px); max-height: calc(100vh - 36px); overflow-x: hidden; overflow-y: auto;
+         background: rgba(10, 10, 20, 0.8); border-radius: 8px; }
+#panel * { min-width: 0; }
+#panel label { display: grid; grid-template-columns: 90px minmax(0, 1fr); align-items: center; gap: 6px; }
+#panel label > select, #panel label > input:not([type='checkbox']) { width: 100%; box-sizing: border-box; margin-inline: 0; }
+#panel select { text-overflow: ellipsis; }
+#panel .row { display: flex; flex-wrap: wrap; gap: 6px; }
+#panel output { overflow-wrap: anywhere; }
 #coeffs.invalid { outline: 2px solid #e44; }
 #status { white-space: pre-line; font-variant-numeric: tabular-nums; }
 #error { position: fixed; inset: 30% 10% auto; padding: 16px; background: #400; color: #fff; border-radius: 8px; }
@@ -16,6 +24,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color:
 #exportStatus.error, #fileStatus.error { color: #f88; }
 #fileStatus:empty { display: none; }
 #panel label.check { display: flex; gap: 4px; }
+#panel label.check > input { flex: none; margin-inline: 0; }
 body.dropping #view { outline: 3px dashed #9cf; outline-offset: -6px; }
 #anim summary { cursor: pointer; font-weight: 600; }
 #anim > :not(summary) { margin-top: 6px; }
@@ -23,11 +32,12 @@ body.dropping #view { outline: 3px dashed #9cf; outline-offset: -6px; }
 #keyCount { font-weight: normal; color: #aaa; }
 #keyList { margin: 0; padding-left: 22px; max-height: 110px; overflow-y: auto; }
 #keyList li { cursor: pointer; }
-#keyList li .marks { margin-right: 3px; }
-#keyList li .coeffs { display: inline-block; max-width: 165px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
-#keyList button { margin-left: 4px; padding: 0 5px; }
+#keyList li > div { display: flex; align-items: center; }
+#keyList li .marks { flex: none; margin-right: 3px; }
+#keyList li .coeffs { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#keyList button { flex: none; margin-left: 4px; padding: 0 5px; }
 #keyList:empty { display: none; }
-#timeline { width: 100%; }
+#timeline { width: 100%; box-sizing: border-box; margin-inline: 0; }
 #animStatus { white-space: pre-line; color: #9cf; font-variant-numeric: tabular-nums; }
 #animStatus.error { color: #f88; }
 #keyPaths { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
