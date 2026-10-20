@@ -26,6 +26,31 @@ export function leadingFixable(coeffs: Complex[]): boolean {
   });
 }
 
+/**
+ * Multiplication table of the group G on digit indices for a set coeffs = c0 * G: mul[x][y] = z where
+ * coeffs[x] * coeffs[y] / c0 = coeffs[z] (near() equality, as leadingFixable). Digit 0 is the identity. null when the
+ * set is not c0 * G or a product is ambiguous (duplicate coefficients), i.e. when the table is not a Latin square.
+ */
+export function groupTable(coeffs: Complex[]): number[][] | null {
+  if (!leadingFixable(coeffs)) return null;
+  const c0 = coeffs[0];
+  const k = coeffs.length;
+  const mulTable: number[][] = [];
+  for (let x = 0; x < k; x++) {
+    const row: number[] = [];
+    for (let y = 0; y < k; y++) {
+      const p = div(mul(coeffs[x], coeffs[y]), c0);
+      const hits = coeffs.flatMap((c, z) => (near(p, c) ? [z] : []));
+      if (hits.length !== 1) return null;
+      row.push(hits[0]);
+    }
+    if (new Set(row).size !== k) return null;
+    mulTable.push(row);
+  }
+  for (let y = 0; y < k; y++) if (new Set(mulTable.map((row) => row[y])).size !== k) return null;
+  return mulTable;
+}
+
 /** Number of polynomials to enumerate: k^(d+1), or k^d with the leading digit pinned. */
 export function totalPolys(k: number, degree: number, fixable: boolean): bigint {
   return BigInt(k) ** BigInt(fixable ? degree : degree + 1);
@@ -47,6 +72,15 @@ export function goldenStride(total: bigint, k: number): bigint {
   let g = (total * GOLDEN_FIX52) >> 52n;
   while (gcd(g, K) !== 1n) g++;
   return g < total ? g : 1n;
+}
+
+/** Golden stride for a mixed-radix space of `size` points: about 0.618 size, bumped until coprime to size (hence to
+ * every radix, so it is invertible modulo every product of low radices). For size = k^D this is goldenStride. */
+export function goldenStrideMixed(size: bigint): bigint {
+  if (size <= 2n) return 1n;
+  let g = (size * GOLDEN_FIX52) >> 52n;
+  while (gcd(g, size) !== 1n) g++;
+  return g < size ? g : 1n;
 }
 
 /** Polynomial index of sample m: (m * G) mod N. */

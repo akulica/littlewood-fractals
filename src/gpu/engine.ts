@@ -3,14 +3,26 @@ import coopSrc from './coop.wgsl?raw';
 import displaySrc from './display.wgsl?raw';
 import { MAX_BATCH_FRAMES } from '../core/animation';
 import type { Complex } from '../core/complex';
-import { MAX_COEFFS, MAX_DEGREE, goldenStride, indexToDigits, leadingFixable, sampleIndex, totalPolys } from '../core/enumeration';
+import { MAX_COEFFS, MAX_DEGREE, leadingFixable } from '../core/enumeration';
+import {
+  ENUM_U32,
+  EnumCursor,
+  REGION_BASE,
+  effectiveEnumeration,
+  enumerationPlan,
+  mixedDigits,
+  packChunk,
+  packPlan,
+  type EnumPlan,
+  type Enumeration,
+} from '../core/reciprocal';
 import { chooseKernel, coopGrid, dispatchGrid, nextBudget, type Kernel } from '../core/schedule';
 import type { View } from '../core/view';
 
 export { MAX_COEFFS, MAX_DEGREE };
+export type { Enumeration };
 export const TOL = 1e-5; // backward-error stop (measured: 1e-6..3e-5 all converge; 1e-5 is fastest without visible change)
 const PARAMS_BYTES = 64;
-const STEP_OFFSET = MAX_DEGREE + 1; // = STEP in the shaders: the stride's digits follow the start digits
 const VIEW_BYTES = 176; // = struct View in display.wgsl: 12 scalars + 4 pad, then 8 vec4f of ring centres
 const MAX_RINGS = 16; // = MAX_RINGS in display.wgsl
 const FRAME_VIEWS = MAX_COEFFS * MAX_BATCH_FRAMES; // = FRAME_VIEWS in roots.wgsl: vec2f index of the per-frame views
@@ -80,8 +92,11 @@ export class Engine {
   height = 0;
   /** Which splat kernel encodeCompute dispatches. calibrate() sets it to the faster one for this GPU. */
   kernel: Kernel = 'perPoly';
-  /** Enumeration order of the polynomials; changing it mid-accumulation would skip or repeat some. */
+  /** Enumeration order of the polynomials; read by setParams/setFrames (the next accumulation). */
   ordering: Ordering = 'golden';
+  /** reciprocal: solve one polynomial of each reversal pair and deposit z and 1/z (about half the solves, the same
+   * picture); plain: solve every polynomial (the original path). Read by setParams/setFrames. */
+  enumeration: Enumeration = 'reciprocal';
   private readonly splatPipe: GPUComputePipeline;
   private readonly coopPipe: GPUComputePipeline;
   private readonly debugPipe: GPUComputePipeline;
@@ -91,7 +106,7 @@ export class Engine {
   private readonly renderPipe: GPURenderPipeline;
   private readonly paramsBuf: GPUBuffer;
   private readonly coeffBuf: GPUBuffer;
-  private readonly digitsBuf: GPUBuffer;
+  private readonly enumBuf: GPUBuffer;
   private readonly statsBuf: GPUBuffer;
   private readonly viewBuf: GPUBuffer;
   private readonly maxBuf: GPUBuffer;
@@ -104,9 +119,8 @@ export class Engine {
   private frameCount = 0; // > 0: batch mode (setFrames), encodeCompute dispatches splatFrames into framesTarget
   private framesTarget: GPUBuffer | null = null;
   private framesBG: GPUBindGroup | null = null;
-  private total = 0n;
-  private freeDigits = 0;
-  private next = 0n;
+  private plan: EnumPlan | null = null;
+  private cursor: EnumCursor | null = null;
   private needsClear = true;
 
   constructor(device: GPUDevice, format: GPUTextureFormat) {
@@ -129,7 +143,7 @@ export class Engine {
     this.paramsBuf = device.createBuffer({ size: PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
     // Coefficients of up to MAX_BATCH_FRAMES frames, then two vec2f per frame for splatFrames' per-frame views.
     this.coeffBuf = device.createBuffer({ size: (FRAME_VIEWS + 2 * MAX_BATCH_FRAMES) * 8, usage: U.STORAGE | U.COPY_DST });
-    this.digitsBuf = device.createBuffer({ size: 2 * STEP_OFFSET * 4, usage: U.STORAGE | U.COPY_DST });
+    this.enumBuf = device.createBuffer({ size: ENUM_U32 * 4, usage: U.STORAGE | U.COPY_DST });
     this.statsBuf = device.createBuffer({ size: 16, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
     this.viewBuf = device.createBuffer({ size: VIEW_BYTES, usage: U.UNIFORM | U.COPY_DST });
     this.maxBuf = device.createBuffer({ size: 16, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
@@ -140,8 +154,19 @@ export class Engine {
     return this.params?.degree ?? 0;
   }
 
+  /** Polynomials covered so far (a solve with a reciprocal partner covers two), of all polynomials. */
   get progress(): { done: bigint; total: bigint } {
-    return { done: this.next, total: this.total };
+    return { done: this.cursor?.covered ?? 0n, total: this.plan?.polys ?? 0n };
+  }
+
+  /** Solves so far, of all solves: the unit of encodeCompute's budget. */
+  get work(): { done: bigint; total: bigint } {
+    return { done: this.cursor?.solved ?? 0n, total: this.plan?.solves ?? 0n };
+  }
+
+  /** Enumeration actually in use (a pinned set without a usable group table runs plain). */
+  get activeEnumeration(): Enumeration | null {
+    return this.plan?.mode ?? null;
   }
 
   /** (Re)allocates the W x H histogram (16 bytes per pixel) and restarts accumulation. */
@@ -163,7 +188,7 @@ export class Engine {
         layout: pipe.getBindGroupLayout(0),
         entries: Object.entries(buffers).map(([b, buffer]) => ({ binding: Number(b), resource: { buffer } })),
       });
-    const splatBuffers = { 0: this.paramsBuf, 1: this.coeffBuf, 2: this.digitsBuf, 3: this.hist, 4: this.statsBuf };
+    const splatBuffers = { 0: this.paramsBuf, 1: this.coeffBuf, 2: this.enumBuf, 3: this.hist, 4: this.statsBuf };
     this.splatBG = bind(this.splatPipe, splatBuffers);
     this.coopBG = bind(this.coopPipe, splatBuffers);
     this.reduceBG = bind(this.reducePipe, { 0: this.viewBuf, 1: this.hist, 2: this.maxBuf });
@@ -172,10 +197,9 @@ export class Engine {
       // The batch's W x H slices no longer match: setFrames() again before the next encodeCompute.
       this.leaveFrames();
       this.params = null;
-      this.total = 0n;
+      this.plan = null;
     }
-    this.next = 0n;
-    this.needsClear = true;
+    this.restart();
   }
 
   /** New coefficients/degree/view: restart accumulation from polynomial 0. */
@@ -186,11 +210,9 @@ export class Engine {
     if (p.coeffs.length < 1 || p.coeffs.length > MAX_COEFFS) throw new RangeError(`need 1..${MAX_COEFFS} coefficients`);
     this.leaveFrames();
     this.params = p;
-    const fixable = leadingFixable(p.coeffs);
-    this.total = totalPolys(p.coeffs.length, p.degree, fixable);
-    this.freeDigits = fixable ? p.degree : p.degree + 1;
-    this.next = 0n;
-    this.needsClear = true;
+    const pinned = leadingFixable(p.coeffs);
+    const { group } = effectiveEnumeration([p.coeffs], pinned, this.enumeration);
+    this.load(enumerationPlan(p.coeffs.length, p.degree, pinned, this.enumeration, group));
     this.device.queue.writeBuffer(this.coeffBuf, 0, new Float32Array(p.coeffs.flatMap((c) => [c.re, c.im])));
   }
 
@@ -199,7 +221,7 @@ export class Engine {
    * (STORAGE | COPY_DST usage, at least frames * W*H*16 bytes) through the warm-starting splatFrames kernel; the
    * engine's own histogram is untouched (loadHistogram() copies a slice into it for display). Restarts accumulation;
    * every encodeCompute chunk then covers the same polynomials in all frames. Stays in effect until setParams() or
-   * resize().
+   * resize(). Pinned + reciprocal needs every frame to give the same group table; otherwise the batch runs plain.
    */
   setFrames(p: FramesParams, target: GPUBuffer): void {
     const n = p.frames.length;
@@ -209,8 +231,8 @@ export class Engine {
     if (!this.hist) throw new Error('call resize() before setFrames()');
     if (target.size < n * this.width * this.height * 16) throw new RangeError(`target holds fewer than ${n} frames of ${this.width}x${this.height}`);
     this.setParams({ coeffs: p.frames[0], degree: p.degree, view: p.view, maxIter: p.maxIter }); // validates degree and k
-    this.total = totalPolys(k, p.degree, p.pinned);
-    this.freeDigits = p.pinned ? p.degree : p.degree + 1;
+    const { group } = effectiveEnumeration(p.frames, p.pinned, this.enumeration);
+    this.load(enumerationPlan(k, p.degree, p.pinned, this.enumeration, group));
     if (p.views && p.views.length !== n) throw new RangeError('need one view per frame');
     this.device.queue.writeBuffer(this.coeffBuf, 0, new Float32Array(p.frames.flatMap((f) => f.flatMap((c) => [c.re, c.im]))));
     const views = p.views ?? p.frames.map(() => p.view);
@@ -220,19 +242,22 @@ export class Engine {
     this.framesTarget = target;
     this.framesBG = this.device.createBindGroup({
       layout: this.framesPipe.getBindGroupLayout(0),
-      entries: [this.paramsBuf, this.coeffBuf, this.digitsBuf, target, this.statsBuf].map((buffer, binding) => ({ binding, resource: { buffer } })),
+      entries: [this.paramsBuf, this.coeffBuf, this.enumBuf, target, this.statsBuf].map((buffer, binding) => ({ binding, resource: { buffer } })),
     });
   }
 
-  /** Encodes the next chunk (<= budget polynomials) as ONE dispatch. Returns how many polynomials it covers. */
+  /**
+   * Encodes the next chunk (<= budget solves) as ONE dispatch. Returns how many solves it holds: each covers one
+   * polynomial, or two with a reciprocal partner (progress counts polynomials, work counts solves). Every chunk
+   * samples all regions of the enumeration in proportion, so any prefix is an even sample of the whole set.
+   */
   encodeCompute(enc: GPUCommandEncoder, budget: number): number {
-    if (!this.params || !this.hist || !this.splatBG || !this.coopBG) return 0;
-    const remaining = this.total - this.next;
+    if (!this.params || !this.plan || !this.cursor || !this.hist || !this.splatBG || !this.coopBG) return 0;
+    const remaining = this.plan.solves - this.cursor.solved;
     const count = remaining <= 0n ? 0 : remaining < BigInt(budget) ? Number(remaining) : Math.floor(budget);
-    const k = this.params.coeffs.length;
-    // The shaders build digit i as start_i + G_i * tid + carry in u32; that sum stays below 2 (k-1) count.
-    // MAX_BUDGET (2^22) keeps it far below 2^32 for k <= 16; checked before encoding anything.
-    if (2 * (k - 1) * count >= 2 ** 32) throw new RangeError(`chunk of ${count} polynomials overflows the u32 digit arithmetic`);
+    // The shaders build slot digit i as start_i + G_i * local + carry in u32; that sum stays below radix * count.
+    // MAX_BUDGET (2^22) keeps it below 2^32 for radix <= 256 (k^2 with k <= 16); checked before encoding anything.
+    if (this.plan.maxRadix * count >= 2 ** 32) throw new RangeError(`chunk of ${count} polynomials overflows the u32 digit arithmetic`);
     if (this.needsClear) {
       if (this.framesTarget) enc.clearBuffer(this.framesTarget, 0, this.frameCount * this.width * this.height * 16);
       else enc.clearBuffer(this.hist);
@@ -240,31 +265,30 @@ export class Engine {
       this.needsClear = false;
     }
     if (count === 0) return 0;
-    const stride = this.ordering === 'golden' ? goldenStride(this.total, k) : 1n;
-    this.writeDigits(sampleIndex(this.next, stride, this.total), stride);
+    const entries = this.cursor.next(count);
+    this.device.queue.writeBuffer(this.enumBuf, 0, packChunk(entries));
     const pass = enc.beginComputePass();
     if (this.framesBG) {
       // perPoly only: a thread keeps its roots in registers from frame to frame (coop has no warm path, see plan).
       const grid = dispatchGrid(count);
-      this.writeParams(count, grid.strideX);
+      this.writeParams(count, grid.strideX, entries.length);
       pass.setPipeline(this.framesPipe!);
       pass.setBindGroup(0, this.framesBG);
       pass.dispatchWorkgroups(grid.x, grid.y);
     } else if (this.kernel === 'coop') {
       const grid = coopGrid(count, this.params.degree);
-      this.writeParams(count, 0); // coop.wgsl derives the index from num_workgroups
+      this.writeParams(count, 0, entries.length); // coop.wgsl derives the index from num_workgroups
       pass.setPipeline(this.coopPipe);
       pass.setBindGroup(0, this.coopBG);
       pass.dispatchWorkgroups(grid.x, grid.y);
     } else {
       const grid = dispatchGrid(count);
-      this.writeParams(count, grid.strideX);
+      this.writeParams(count, grid.strideX, entries.length);
       pass.setPipeline(this.splatPipe);
       pass.setBindGroup(0, this.splatBG);
       pass.dispatchWorkgroups(grid.x, grid.y);
     }
     pass.end();
-    this.next += BigInt(count);
     return count;
   }
 
@@ -294,8 +318,7 @@ export class Engine {
       coopMs = Math.min(coopMs, await time('coop'));
     }
     this.kernel = chooseKernel(perPolyMs, coopMs);
-    this.next = 0n;
-    this.needsClear = true;
+    this.restart();
     return { kernel: this.kernel, perPolyMs, coopMs };
   }
 
@@ -339,20 +362,27 @@ export class Engine {
     return new Uint32Array(await this.readBuffer(this.maxBuf, 4))[0];
   }
 
-  /** Test/debug: roots of polynomials first .. first+count-1 (lexicographic, wrapping mod N); `degree` vec2f slots each. Resets accumulation. */
+  /** Test/debug: roots of polynomials first .. first+count-1 (lexicographic, wrapping mod N, plain enumeration);
+   * `degree` vec2f slots each. Resets accumulation. */
   async solveDebug(coeffs: Complex[], degree: number, first: bigint, count: number): Promise<Float32Array> {
     this.setParams({ coeffs, degree, view: { cx: 0, cy: 0, pxPerUnit: 1 }, maxIter: 32 });
+    const plan = enumerationPlan(coeffs.length, degree, leadingFixable(coeffs), 'plain', null);
+    this.load(plan);
     const bytes = count * degree * 8;
     const out = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     const grid = dispatchGrid(count);
-    this.writeDigits(first, 1n); // lexicographic: polynomial t of the output is index first + t
-    this.writeParams(count, grid.strideX);
+    // Plain is one region whose index is the base-k polynomial index: polynomial t of the output is index first + t.
+    const [region] = plan.regions;
+    const radices = region.slots.map((s) => s.radix);
+    const entry = { region: 0, threadStart: 0, count, start: mixedDigits(first % region.size, radices), stride: mixedDigits(1n, radices) };
+    this.device.queue.writeBuffer(this.enumBuf, 0, packChunk([entry]));
+    this.writeParams(count, grid.strideX, 1);
     const bg = this.device.createBindGroup({
       layout: this.debugPipe.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.paramsBuf } },
         { binding: 1, resource: { buffer: this.coeffBuf } },
-        { binding: 2, resource: { buffer: this.digitsBuf } },
+        { binding: 2, resource: { buffer: this.enumBuf } },
         { binding: 5, resource: { buffer: out } },
       ],
     });
@@ -371,7 +401,7 @@ export class Engine {
   destroy(): void {
     this.hist?.destroy();
     this.hist = null;
-    for (const b of [this.paramsBuf, this.coeffBuf, this.digitsBuf, this.statsBuf, this.viewBuf, this.maxBuf]) b.destroy();
+    for (const b of [this.paramsBuf, this.coeffBuf, this.enumBuf, this.statsBuf, this.viewBuf, this.maxBuf]) b.destroy();
   }
 
   async readHistogram(): Promise<Uint32Array> {
@@ -383,22 +413,25 @@ export class Engine {
     return { unconverged: new Uint32Array(await this.readBuffer(this.statsBuf, 16))[0] };
   }
 
-  private writeParams(count: number, strideX: number): void {
+  private writeParams(count: number, strideX: number, entries: number): void {
     const p = this.params!;
     const ab = new ArrayBuffer(PARAMS_BYTES);
-    new Uint32Array(ab).set([p.degree, p.coeffs.length, count, strideX, this.width, this.height, p.maxIter, this.freeDigits]);
+    new Uint32Array(ab).set([p.degree, p.coeffs.length, count, strideX, this.width, this.height, p.maxIter, entries]);
     new Float32Array(ab).set([p.view.cx, p.view.cy, p.view.pxPerUnit, TOL], 8);
     new Uint32Array(ab).set([Math.max(this.frameCount, 1)], 12);
     this.device.queue.writeBuffer(this.paramsBuf, 0, ab);
   }
 
-  /** One buffer, one write per chunk: the chunk's first index, then the stride G (both as base-k digits). */
-  private writeDigits(first: bigint, stride: bigint): void {
-    const p = this.params!;
-    const d = new Uint32Array(2 * STEP_OFFSET);
-    d.set(indexToDigits(first, p.coeffs.length, p.degree));
-    d.set(indexToDigits(stride, p.coeffs.length, p.degree), STEP_OFFSET);
-    this.device.queue.writeBuffer(this.digitsBuf, 0, d);
+  /** Uses `plan` from now on (its regions and tables go to the GPU once) and restarts accumulation. */
+  private load(plan: EnumPlan): void {
+    this.plan = plan;
+    this.device.queue.writeBuffer(this.enumBuf, REGION_BASE * 4, packPlan(plan));
+    this.restart();
+  }
+
+  private restart(): void {
+    this.cursor = this.plan && new EnumCursor(this.plan, this.ordering === 'golden');
+    this.needsClear = true;
   }
 
   private leaveFrames(): void {
@@ -421,6 +454,8 @@ export class Engine {
 
 export interface ImageRequest {
   kernel: Kernel;
+  /** Default reciprocal. */
+  enumeration?: Enumeration;
   params: FractalParams;
   display: DisplayParams;
   width: number;
@@ -444,6 +479,7 @@ export async function renderImage(
   const out = new RgbaReadback(device, width, height);
   try {
     engine.kernel = req.kernel;
+    engine.enumeration = req.enumeration ?? 'reciprocal';
     engine.resize(width, height);
     engine.setParams(req.params);
     let budget = 1 << 16;

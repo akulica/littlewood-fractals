@@ -31,6 +31,7 @@ import {
   type MetadataInput,
 } from '../core/metadata';
 import { encodePng, readPngTexts } from '../core/png';
+import { effectiveEnumeration, type Enumeration } from '../core/reciprocal';
 import { nextBudget, type Kernel } from '../core/schedule';
 import { fitRect, fitView, panBy, pixelToWorld, viewRect, worldToPixel, zoomAt, type View, type ViewRect } from '../core/view';
 import { renderAnimation, type DraftQuality } from '../gpu/animation';
@@ -346,8 +347,10 @@ async function start(): Promise<void> {
     try {
       while (!interacting && !playing && !exporting) {
         const enc = device.createCommandEncoder();
+        const before = engine.progress.done;
         const count = engine.encodeCompute(enc, idleBudget);
         if (count === 0) break;
+        const covered = Number(engine.progress.done - before); // a reciprocal solve covers two polynomials
         const deg = engine.degree;
         const t0 = performance.now();
         device.queue.submit([enc.finish()]);
@@ -355,7 +358,7 @@ async function start(): Promise<void> {
         await device.queue.onSubmittedWorkDone();
         const ms = performance.now() - t0;
         idleBudget = nextBudget(idleBudget, ms, IDLE_TARGET_MS);
-        rootsPerSec = (count * deg) / (ms / 1000);
+        rootsPerSec = (covered * deg) / (ms / 1000);
       }
     } finally {
       pumping = false;
@@ -367,11 +370,13 @@ async function start(): Promise<void> {
     if (inFlight || !view) return;
     const enc = device.createCommandEncoder();
     let count = 0;
+    const before = engine.progress.done;
     if (exporting) {
       // live compute paused; still redraw if display settings change
     } else if (interacting || playing) count = engine.encodeCompute(enc, budget);
     else if (!pumping && engine.progress.done < engine.progress.total) void pump();
     if (count === 0 && !displayDirty && !histChanged) return; // nothing new to show
+    const covered = Number(engine.progress.done - before);
     engine.encodeDisplay(enc, ctx!.getCurrentTexture().createView(), display());
     displayDirty = false;
     histChanged = false;
@@ -384,22 +389,24 @@ async function start(): Promise<void> {
       const ms = performance.now() - t0;
       if (count > 0) {
         budget = nextBudget(budget, ms, TARGET_MS);
-        rootsPerSec = (count * deg) / (ms / 1000);
+        rootsPerSec = (covered * deg) / (ms / 1000);
       }
       updateStatus();
     });
   }
 
   // ---- reproduction metadata (core/metadata): recorded in every export, restored by Load ----
+  /** What a render of `frames` uses: reciprocal unless a pinned set lacks one shared group table. */
+  const enumerationOf = (frames: Complex[][], pinned: boolean) => effectiveEnumeration(frames, pinned, engine.enumeration).mode;
   function metaInput(
     kind: MetadataInput['kind'],
-    o: { pinned: boolean; kernel: string; display: DisplayParams } & Pick<MetadataInput, 'output' | 'animation' | 'frame'>,
+    o: { pinned: boolean; kernel: string; enumeration: Enumeration; display: DisplayParams } & Pick<MetadataInput, 'output' | 'animation' | 'frame'>,
   ): MetadataInput {
     return {
       kind,
       build: BUILD_INFO,
       environment: { gpu, userAgent: navigator.userAgent, timestamp: new Date().toISOString() },
-      fractal: { coeffs, degree, maxIter: MAX_ITER, tol: TOL, pinned: o.pinned, ordering: engine.ordering, kernel: o.kernel },
+      fractal: { coeffs, degree, maxIter: MAX_ITER, tol: TOL, pinned: o.pinned, ordering: engine.ordering, kernel: o.kernel, enumeration: o.enumeration },
       screen: { cx: view!.cx, cy: view!.cy, pxPerUnit: view!.pxPerUnit, width: canvas.width, height: canvas.height, dpr: dpr() },
       output: o.output,
       display: {
@@ -440,11 +447,17 @@ async function start(): Promise<void> {
         rings: ringsInput.checked ? { scale: density * dpr(), centres: coeffs.map((c) => worldToPixel(outView, width, height, c.re, c.im)) } : undefined,
       };
       const meta = buildMetadata(
-        metaInput('image', { pinned: leadingFixable(coeffs), kernel: engine.kernel, output: { ...outView, width, height }, display: imageDisplay }),
+        metaInput('image', {
+          pinned: leadingFixable(coeffs),
+          kernel: engine.kernel,
+          enumeration: enumerationOf([coeffs], leadingFixable(coeffs)),
+          output: { ...outView, width, height },
+          display: imageDisplay,
+        }),
       );
       const rgba = await renderImage(
         device,
-        { kernel: engine.kernel, params: { coeffs, degree, view: outView, maxIter: MAX_ITER }, display: imageDisplay, width, height },
+        { kernel: engine.kernel, enumeration: engine.enumeration, params: { coeffs, degree, view: outView, maxIter: MAX_ITER }, display: imageDisplay, width, height },
         (done, total) => setExportStatus(`exporting ${width}×${height}: ${(Number((done * 1000n) / total) / 10).toFixed(1)} %`),
       );
       setExportStatus(`encoding PNG…`);
@@ -637,6 +650,7 @@ async function start(): Promise<void> {
       metaInput('animation', {
         pinned: pinnable(coeffFrames),
         kernel: 'splatFrames', // thread per polynomial with warm start, whatever the live view's kernel is
+        enumeration: enumerationOf(coeffFrames, pinnable(coeffFrames)),
         output: { ...(viewFrames?.[0] ?? outView), width, height },
         display: base,
         animation: animationRecord(width, height, mp4Bitrate(width, height, rate)),
@@ -682,6 +696,7 @@ async function start(): Promise<void> {
           brightness: brightnessSelect.value as Brightness,
           quality: Number(qualitySelect.value) as DraftQuality,
           maxIter: MAX_ITER,
+          enumeration: engine.enumeration,
         },
         (rgba, i, frameInfo) =>
           writer.frame(rgba, i, () =>
@@ -746,6 +761,7 @@ async function start(): Promise<void> {
       metaInput('settings', {
         pinned: leadingFixable(coeffs),
         kernel: engine.kernel,
+        enumeration: enumerationOf([coeffs], leadingFixable(coeffs)),
         display: display(),
         output: sizeOk ? { ...exportView(view, canvas.width, canvas.height, width, height), width, height } : undefined,
         animation: keys.length > 0 ? animationRecord(width, height, mp4Bitrate(width, height, fps())) : undefined,

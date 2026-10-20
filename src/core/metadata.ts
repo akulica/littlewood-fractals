@@ -5,6 +5,7 @@ import type { Brightness, Easing, Keyframe } from './animation';
 import { formatComplex, type Complex } from './complex';
 import { MAX_COEFFS, MAX_DEGREE } from './enumeration';
 import type { PngText } from './png';
+import type { Enumeration } from './reciprocal';
 import type { ViewRect } from './view';
 
 export const SCHEMA = 'littlewood-fractals/1';
@@ -48,6 +49,9 @@ export interface FractalRecord {
   ordering: string;
   /** Splat kernel actually used: perPoly or coop (f32 rounding differs between them). */
   kernel: string;
+  /** reciprocal (z and 1/z from one solve) or plain; f32 rounding differs slightly. Absent in files made before it
+   * existed (those were plain). */
+  enumeration?: Enumeration;
 }
 
 /** A view on a width x height pixel grid (pxPerUnit in that grid's pixels). */
@@ -225,6 +229,7 @@ const KINDS = ['image', 'animation', 'frame', 'settings'] as const;
 const EASINGS = ['smooth', 'linear'] as const;
 const BRIGHTNESS = ['locked', 'frame0', 'perFrame'] as const;
 const QUALITIES = [1, 0.5, 0.25, 0.1] as const;
+const ENUMERATIONS = ['reciprocal', 'plain'] as const;
 
 /**
  * Parses and validates metadata JSON. Throws MetadataError with a message fit for the status line: not JSON,
@@ -280,6 +285,7 @@ export function parseMetadata(json: string): Metadata {
       rings: bool(display, 'rings', 'display'),
     },
   };
+  if (fractal.enumeration !== undefined) m.fractal.enumeration = oneOf(fractal, 'enumeration', 'fractal', ENUMERATIONS);
   if (display.fixedMax !== undefined) m.display.fixedMax = num(display, 'fixedMax', 'display', (v) => v >= 0, 'a number ≥ 0');
   if (raw.output !== undefined) m.output = viewRecord(raw.output, 'output');
   if (raw.animation !== undefined) {

@@ -8,7 +8,7 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 
 - **Node.js 20+** (for the dev server, build and tests).
 - **A WebGPU browser** to use the app (see *Browser support*). It must be opened via `localhost` or `https://`, because WebGPU is disabled on plain `http://` from other hosts.
-- **A real GPU for `npm test`:** the GPU tests run the WGSL kernels through Dawn (the `webgpu` npm package, prebuilt for Windows/macOS/Linux x64). On a machine without a usable GPU, only the 11 pure-logic test files pass.
+- **A real GPU for `npm test`:** the GPU tests run the WGSL kernels through Dawn (the `webgpu` npm package, prebuilt for Windows/macOS/Linux x64). On a machine without a usable GPU, only the 12 pure-logic test files pass.
 - **Windows PowerShell:** if `npm` fails with *"running scripts is disabled on this system"*, either use `npm.cmd` (e.g. `npm.cmd run dev`) or run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
 ## Run
@@ -16,7 +16,7 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 ```bash
 npm install
 npm run dev       # http://localhost:5173  (WebGPU needs https:// or localhost)
-npm test          # 135 tests: pure logic + real-GPU tests via Dawn (no browser needed)
+npm test          # 178 tests: pure logic + real-GPU tests via Dawn (no browser needed)
 npm run bench     # throughput + kernel-variant benchmark on this machine's GPU
 npm run build     # static site in dist/
 ```
@@ -74,6 +74,24 @@ Kernel variants (`tests/gpu/variants.perf.ts`, ratio of cooperative time to per-
 The throughput table above uses the per-polynomial kernel. With auto-selection the PC uses the cooperative kernel, which brings degree 20 down to **50 ms** and degree 24 down to **0.71 s** (`calibrate: coop … coop/perPoly = 0.72` in `bench-pc.log`).
 
 Since the winner depends on the GPU, both kernels ship. At startup `Engine.calibrate()` runs 2¹⁸ degree-20 Littlewood polynomials on each kernel: interleaved, best of 3 after a warm-up, about 0.1–0.5 s in total. It switches to the cooperative kernel only if that wins by more than 10 %, so timing noise can't flip the choice on GPUs where the two are close.
+
+## Reciprocal symmetry
+
+- **Idea.** Reversing a coefficient string gives `z^d·p(1/z)`, again a polynomial of the set, with roots `1/z`. So each solve deposits its roots `z` and its partner's roots `1/z`, and only about half the polynomials are solved (`src/core/reciprocal.ts`, on by default; `Engine.enumeration = 'plain'` is the original path). The partner gets its own colour (the hue of the reversed digits). Its trimmed leading zeros become roots at 0, and the polynomial's own roots at 0 go to infinity.
+- **Exact cover.** Coefficient positions pair up from the outside, `(a_j, a_{d−j})`, and reversal swaps each pair. Region `R_j` fixes pairs `0..j−1` to `x = y`, takes one representative of each swapped couple at pair `j`, and leaves the rest free. The reversal of a string in `R_j` has the other member of the couple at pair `j`, so it lies in no region. Every string outside the regions is the reversal of exactly one string inside. The last region (all layer pairs fixed, at most 1/32 of the set) solves its strings alone.
+- **Pinned sets** (`c0·G`) reverse and then renormalise the leading coefficient. This maps the class `a_0 = c0·r` onto `r⁻¹`: classes with `r ≠ r⁻¹` are enumerated once with partners, and self-inverse classes are layered with the twisted pair map `(x, y) → (y·r, x·r)`.
+- **Even preview.** Each region has its own mixed-radix golden stride (coprime to every radix), and every chunk splits across all regions in proportion to their size. So any prefix is still an even sample of the whole set.
+- **Tests.** `tests/reciprocal.test.ts` checks every string is covered exactly once, exhaustively, for small sets (pinned, unpinned, with 0, d = 1–7). `tests/gpu/reciprocal.test.ts` checks root counts and colour sums equal the plain path's exactly. Pixel differences stay below the noise between the two plain kernels.
+- Measured (`tests/gpu/reciprocal.perf.ts`, 1920×1080, every polynomial, best of 3, plain → reciprocal):
+
+  | Set | Degree | RX 9060 XT perPoly | RX 9060 XT coop | Arc 140T perPoly | Arc 140T coop |
+  |---|---|---|---|---|---|
+  | {1, −0.4+0.75i} | 20 | 82 → 43 ms (1.91×) | 68 → 34 ms (1.98×) | 219 → 119 ms (1.84×) | 288 → 150 ms (1.93×) |
+  | {1, −0.4+0.75i} | 22 | 479 → 260 ms (1.84×) | 364 → 171 ms (2.12×) | 1065 → 561 ms (1.90×) | 1448 → 716 ms (2.02×) |
+  | Littlewood (pinned) | 20 | 41 → 21 ms (1.93×) | 34 → 17 ms (2.04×) | 110 → 59 ms (1.86×) | 149 → 73 ms (2.05×) |
+  | Littlewood (pinned) | 22 | 250 → 104 ms (2.42×) | 178 → 80 ms (2.23×) | 630 → 286 ms (2.20×) | 709 → 350 ms (2.02×) |
+
+  Animation at 1920×1080, d = 22 (`animation.perf.ts`): 241 → 175 ms/frame on the RX 9060 XT, 780 → 380 ms/frame on the Arc 140T. Colour sums match the plain path to ~1e-4 (Littlewood: 1–2 %, the same multiple-root f32 noise as between the two plain kernels; `reciprocalColour.test.ts`).
 
 ## How roots are stored (they aren't)
 
@@ -142,7 +160,7 @@ Root counts are multiplied by (export px ÷ screen px)² before tone-mapping, so
 Every export records how to make it again, as JSON with schema `littlewood-fractals/1` (`src/core/metadata.ts`):
 - **build:** package version, `git describe --always --dirty` and build time (injected by Vite `define` at build / dev-server start; `unknown` without git);
 - **environment:** GPU adapter (vendor, architecture, device, description), user agent, timestamp;
-- **fractal:** coefficients at full double precision, degree, `maxIter`, tolerance, pinned or not, enumeration order, kernel actually used;
+- **fractal:** coefficients at full double precision, degree, `maxIter`, tolerance, pinned or not, enumeration order, kernel actually used, enumeration (`reciprocal` or `plain`; optional, files made before it existed load as before);
 - **screen** (centre, `pxPerUnit`, canvas size, dpr) and the **output's own view** (centre, `pxPerUnit` in output pixels, W×H);
 - **display:** colour mode, exposure, gamma, `countScale`, rings;
 - **animation:** the keyframes exactly as stored, frames, fps, loop, easing, brightness, draft quality, batch size, codec and bitrate; each PNG frame adds its index and its interpolated coefficients, view, exposure/gamma, `countScale` and `fixedMax`.
@@ -171,7 +189,7 @@ Reproducibility: the same parameters on the same GPU and driver give a bit-ident
   - an integer inf/NaN check, because WGSL may assume floats are finite.
   - Accuracy against an f64 reference: better than 1e-4 for general sets, better than 1e-3 for Littlewood (clustered roots).
 - **No roots stored.** Each root is `atomicAdd`ed into a per-pixel histogram (count + RGB). A reduction finds the densest pixel, and a fragment shader tone-maps with a log curve.
-- **Enumeration.** Polynomial number n is decoded from its base-k digits (digit i picks `a_i`). The CPU sends each chunk's start digits as BigInt, so totals beyond 2⁵³ work.
+- **Enumeration.** Polynomial number n is decoded from its base-k digits (digit i picks `a_i`). The CPU sends each chunk's start digits as BigInt, so totals beyond 2⁵³ work. With reciprocal symmetry (the default) the same decoding runs per region, in that region's mixed radix (single digits and digit pairs, see *Reciprocal symmetry*).
 - **Enumeration order: golden stride.** Sample m is polynomial m·G mod N, with G ≈ 0.618·N made coprime to k. The shader gets the digits of the chunk start and of G and adds `G·tid` digit by digit with carry.
   - It is a bijection of [0, N), so the full render is just the continuation of whatever prefix is on screen, with a bit-identical final histogram.
   - Any prefix is spread evenly over the whole set: a Weyl sequence in the high digits, and every block of k^j samples hits each pattern of the low j digits exactly once.

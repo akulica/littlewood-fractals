@@ -3,7 +3,7 @@ import type { Complex } from '../core/complex';
 import { totalPolys } from '../core/enumeration';
 import { nextBudget } from '../core/schedule';
 import { worldToPixel, type View } from '../core/view';
-import { Engine, RgbaReadback, type DisplayParams } from './engine';
+import { Engine, RgbaReadback, type DisplayParams, type Enumeration } from './engine';
 
 /** Fraction of each frame's polynomials to render (a golden-order prefix: unbiased, just noisier). */
 export type DraftQuality = 1 | 0.5 | 0.25 | 0.1;
@@ -29,13 +29,15 @@ export interface AnimationRequest {
   brightness: Brightness;
   quality: DraftQuality;
   maxIter: number;
+  /** Default reciprocal (Engine.enumeration). */
+  enumeration?: Enumeration;
 }
 
 export interface AnimationProgress {
   /** Frames handed to the sink so far. */
   frame: number;
   frames: number;
-  /** Polynomial-frames solved so far, of polysTotal. */
+  /** Polynomial-frames covered so far, of polysTotal (in proportion to the solves done). */
   polysDone: number;
   polysTotal: number;
 }
@@ -82,11 +84,12 @@ export async function renderAnimation(
   const frameBytes = width * height * 16;
   const perBatch = Math.min(frames.length, batchFrames(frameBytes, device.limits));
   const pinned = pinnable(frames);
-  const total = totalPolys(frames[0].length, req.degree, pinned);
   // Golden order makes every prefix an even sample of the whole set, so a draft is simply a shorter prefix.
-  const perFrame = req.quality >= 1 ? total : (total * BigInt(Math.round(req.quality * 1000)) + 999n) / 1000n;
+  const share = (total: bigint) => (req.quality >= 1 ? total : (total * BigInt(Math.round(req.quality * 1000)) + 999n) / 1000n);
+  const perFrame = share(totalPolys(frames[0].length, req.degree, pinned)); // polynomials (progress)
   const progress: AnimationProgress = { frame: 0, frames: frames.length, polysDone: 0, polysTotal: Number(perFrame) * frames.length };
   const engine = new Engine(device, 'rgba8unorm');
+  engine.enumeration = req.enumeration ?? 'reciprocal';
   const out = new RgbaReadback(device, width, height);
   let slices: GPUBuffer | null = null;
   let fixedMax = 0;
@@ -98,16 +101,18 @@ export async function renderAnimation(
     for (let first = 0; first < frames.length; first += perBatch) {
       const batch = frames.slice(first, first + perBatch);
       engine.setFrames({ frames: batch, views: views.slice(first, first + perBatch), degree: req.degree, view: req.view, maxIter: req.maxIter, pinned }, slices);
-      while (engine.progress.done < perFrame) {
+      const work = share(engine.work.total); // solves (with reciprocal partners about half the polynomials)
+      while (engine.work.done < work) {
         signal?.throwIfAborted();
-        const left = perFrame - engine.progress.done;
+        const left = work - engine.work.done;
         const enc = device.createCommandEncoder();
         engine.encodeCompute(enc, left < BigInt(budget) ? Number(left) : budget);
         const t0 = performance.now();
         device.queue.submit([enc.finish()]);
         await device.queue.onSubmittedWorkDone();
         budget = nextBudget(budget, performance.now() - t0, TARGET_MS);
-        progress.polysDone = first * Number(perFrame) + Number(engine.progress.done) * batch.length;
+        const done = engine.work.done === work ? perFrame : (perFrame * engine.work.done) / work;
+        progress.polysDone = first * Number(perFrame) + Number(done) * batch.length;
         onProgress?.({ ...progress });
       }
       unconverged += (await engine.readStats()).unconverged;

@@ -7,12 +7,12 @@ const WG: u32 = 64u;
 struct Params {
   degree: u32,      // d: highest term index (polynomial has d+1 coefficient slots)
   numCoeffs: u32,   // k: size of the coefficient set
-  count: u32,       // polynomials in this dispatch
+  count: u32,       // solves (threads) in this dispatch
   strideX: u32,     // invocations per dispatch row = workgroupsX * WG
   width: u32,       // histogram width in pixels
   height: u32,      // histogram height in pixels
   maxIter: u32,     // Aberth sweeps cap
-  freeDigits: u32,  // D: digits that vary (d when the leading digit is pinned, else d+1); N = k^D
+  entries: u32,     // chunk entries in `en`: the regions this dispatch samples (core/reciprocal.ts)
   center: vec2f,    // complex value at the canvas centre
   pxPerUnit: f32,   // pixels per unit of the complex plane
   tol: f32,         // backward-error stop: |p(z)| <= tol * sum|a_i||z|^i  (engine uses 1e-5)
@@ -25,15 +25,17 @@ struct Params {
 @group(0) @binding(0) var<uniform> P: Params;
 // k coefficient values. splatFrames: frames * k values, then from FRAME_VIEWS two vec2f per frame: centre, (pxPerUnit, 0).
 @group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;
-// Base-k digits (little-endian, digit i picks a_i): [0..=32] = this dispatch's first index, [33..=65] = stride G.
-@group(0) @binding(2) var<storage, read> digits: array<u32>;
+// Enumeration (core/reciprocal.ts packChunk / packPlan): chunk entries, then region descriptors, then tables.
+@group(0) @binding(2) var<storage, read> en: array<u32>;
 @group(0) @binding(3) var<storage, read_write> hist: array<atomic<u32>>;  // 4 u32 per pixel: count, r, g, b (splatFrames: one W*H slice per frame)
 @group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>; // [0] = unconverged polynomials (splatFrames: polynomial-frames)
 @group(0) @binding(5) var<storage, read_write> outRoots: array<vec2f>;    // debugRoots only: degree slots per polynomial
 
 var<private> a: array<vec2f, MAX_DEG + 1u>;
 var<private> z: array<vec2f, MAX_DEG>;
-var<private> hue: f32;
+var<private> polyRgb: vec3u;   // colour of this thread's polynomial
+var<private> partnerRgb: vec3u; // colour of its partner (the reversed polynomial)
+var<private> partner: bool;    // also deposit the partner's roots
 var<private> dg: array<u32, MAX_DEG + 1u>;  // splatFrames: this thread's digits, decoded once for all frames
 
 fn cmul(p: vec2f, q: vec2f) -> vec2f { return vec2f(p.x * q.x - p.y * q.y, p.x * q.y + p.y * q.x); }
@@ -48,29 +50,64 @@ fn finite2(v: vec2f) -> bool {
   return all(e != vec2u(0x7f800000u));
 }
 
-const STEP: u32 = MAX_DEG + 1u;  // offset of the stride's digits in `digits`
 const FRAME_VIEWS: u32 = 128u;   // = MAX_COEFFS * MAX_BATCH_FRAMES in engine.ts: per-frame views follow the coefficients
+// Layout of `en`, = core/reciprocal.ts: entry {threadStart, region, 0, 0, start[MAX_SLOTS], stride[MAX_SLOTS]};
+// region {slots, partner, pmap, 0, then per slot radix, table, p, q}; tables of packed digits x | y << 8.
+const MAX_SLOTS: u32 = MAX_DEG + 1u;
+const MAX_REGIONS: u32 = 32u;
+const ENTRY: u32 = 4u + 2u * MAX_SLOTS;
+const REGION: u32 = 4u + 4u * MAX_SLOTS;
+const REGION_BASE: u32 = MAX_REGIONS * ENTRY;
+const TABLE_BASE: u32 = REGION_BASE + MAX_REGIONS * REGION;
+const MAX_TABLE: u32 = 2048u;
 
-// Fills a[0..=degree] for polynomial number (first + tid * G) mod k^D, digit by digit with carry. Every digit
-// value stays below 2 (k-1) count < 2^32 (Engine asserts it). The carry out of digit D-1 is dropped, which is
-// exactly the mod N; digits >= D (the pinned leading one) are 0. Returns (lo, hi):
+fn tbl(i: u32) -> u32 { return en[TABLE_BASE + min(i, MAX_TABLE - 1u)]; }
+
+// Thread tid's polynomial (core/reciprocal.ts decodeThread): the chunk entry holding tid, then its sample index
+// start + stride * local, added slot by slot with carry in the region's mixed radix. Each slot's table entry gives
+// the digits of one or two positions, written as a[i].x = f32(digit) (exact: digits < 16). Every value stays below
+// radix * count <= 256 * count < 2^32 (Engine asserts it); the carry out of the last slot is dropped (mod size).
+// Sets polyRgb from the digits (low-order terms dominate the hue: Egan's palette idea), partnerRgb from the
+// partner's digits pmap[s_(d-i)] and partner from the region.
+fn decode(tid: u32) {
+  var e = 0u;
+  for (var i = 1u; i < min(P.entries, MAX_REGIONS); i++) {
+    if (en[i * ENTRY] <= tid) { e = i; }
+  }
+  let eb = e * ENTRY;
+  let local = tid - en[eb];
+  let rb = REGION_BASE + min(en[eb + 1u], MAX_REGIONS - 1u) * REGION;
+  let slots = min(en[rb], MAX_SLOTS);
+  var carry = 0u;
+  for (var s = 0u; s < slots; s++) {
+    let sb = rb + 4u + 4u * s;
+    let radix = max(en[sb], 1u);
+    let v = en[eb + 4u + s] + en[eb + 4u + MAX_SLOTS + s] * local + carry;
+    let t = tbl(en[sb + 1u] + v % radix);
+    carry = v / radix;
+    a[min(en[sb + 2u], MAX_DEG)] = vec2f(f32(t & 0xffu), 0.0);
+    a[min(en[sb + 3u], MAX_DEG)] = vec2f(f32(t >> 8u), 0.0);
+  }
+  partner = en[rb + 1u] != 0u;
+  let pmap = en[rb + 2u];
+  let k = P.numCoeffs;
+  var w = 1.0;
+  var h = 0.0;
+  var ph = 0.0;
+  for (var i = 0u; i <= P.degree; i++) {
+    w = w / f32(k);
+    h += a[i].x * w;
+    ph += f32(tbl(pmap + u32(a[P.degree - i].x))) * w;
+  }
+  polyRgb = vec3u(hue2rgb(h) * 63.0 + 0.5);  // 6-bit so a pixel can take 68M roots before u32 overflow
+  partnerRgb = vec3u(hue2rgb(ph) * 63.0 + 0.5);
+}
+
+// After decode: the coefficients of thread tid's polynomial. Returns (lo, hi):
 // lo = number of zero low coefficients (roots at 0), hi = effective degree after trimming zero leading coefficients.
 fn loadPoly(tid: u32) -> vec2u {
-  let k = P.numCoeffs;
-  var carry = 0u;
-  var w = 1.0;
-  hue = 0.0;
-  for (var i = 0u; i <= P.degree; i++) {
-    var dg = 0u;
-    if (i < P.freeDigits) {
-      let v = digits[i] + digits[STEP + i] * tid + carry;
-      dg = v % k;
-      carry = v / k;
-    }
-    a[i] = coeffs[dg];
-    w = w / f32(k);
-    hue += f32(dg) * w;     // low-order terms dominate the hue (Egan's palette idea)
-  }
+  decode(tid);
+  for (var i = 0u; i <= P.degree; i++) { a[i] = coeffs[u32(a[i].x)]; }
   return trim();
 }
 
@@ -82,23 +119,10 @@ fn trim() -> vec2u {
   return vec2u(lo, hi);
 }
 
-// splatFrames: loadPoly's digits and hue, kept in dg[] so every frame reuses them.
+// splatFrames: decode's digits, kept in dg[] so every frame reuses them.
 fn decodeDigits(tid: u32) {
-  let k = P.numCoeffs;
-  var carry = 0u;
-  var w = 1.0;
-  hue = 0.0;
-  for (var i = 0u; i <= P.degree; i++) {
-    var d = 0u;
-    if (i < P.freeDigits) {
-      let v = digits[i] + digits[STEP + i] * tid + carry;
-      d = v % k;
-      carry = v / k;
-    }
-    dg[i] = d;
-    w = w / f32(k);
-    hue += f32(d) * w;
-  }
+  decode(tid);
+  for (var i = 0u; i <= P.degree; i++) { dg[i] = u32(a[i].x); }
 }
 
 // Frame f's polynomial for the digits in dg[]; returns (lo, hi) as loadPoly does.
@@ -189,15 +213,23 @@ fn deposit(r: vec2f, rgb: vec3u, slice: u32, c: vec2f, ppu: f32) {
   atomicAdd(&hist[idx + 3u], rgb.z);
 }
 
+// The polynomial's roots (lo at 0, then z[0..hi-lo)); with a partner also the reversed polynomial's: its d - hi
+// trimmed leading zeros become roots at 0, the rest are 1/z (the polynomial's roots at 0 go to infinity).
+fn depositRoots(lh: vec2u, slice: u32, c: vec2f, ppu: f32) {
+  for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), polyRgb, slice, c, ppu); }
+  for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], polyRgb, slice, c, ppu); }
+  if (!partner) { return; }
+  for (var j = lh.y; j < P.degree; j++) { deposit(vec2f(0.0), partnerRgb, slice, c, ppu); }
+  for (var j = 0u; j < lh.y - lh.x; j++) { deposit(crecip(z[j]), partnerRgb, slice, c, ppu); }
+}
+
 @compute @workgroup_size(WG)
 fn splat(@builtin(global_invocation_id) gid: vec3u) {
   let tid = gid.x + gid.y * P.strideX;
   if (tid >= P.count) { return; }
   let lh = loadPoly(tid);
-  if (!solve(lh.x, lh.y)) { atomicAdd(&stats[0], 1u); }
-  let rgb = vec3u(hue2rgb(hue) * 63.0 + 0.5);  // 6-bit so a pixel can take 68M roots before u32 overflow
-  for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), rgb, 0u, P.center, P.pxPerUnit); }
-  for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], rgb, 0u, P.center, P.pxPerUnit); }
+  if (!solve(lh.x, lh.y)) { atomicAdd(&stats[0], select(1u, 2u, partner)); }
+  depositRoots(lh, 0u, P.center, P.pxPerUnit);
 }
 
 // Animation: one thread follows its polynomial through P.frames frames (frame f uses coeffs[f*k ..] and histogram
@@ -208,7 +240,6 @@ fn splatFrames(@builtin(global_invocation_id) gid: vec3u) {
   let tid = gid.x + gid.y * P.strideX;
   if (tid >= P.count) { return; }
   decodeDigits(tid);
-  let rgb = vec3u(hue2rgb(hue) * 63.0 + 0.5);
   var prev = vec2u(MAX_DEG + 1u);   // no previous frame: the first one starts cold
   for (var f = 0u; f < P.frames; f++) {
     let lh = loadFrame(f);
@@ -225,12 +256,11 @@ fn splatFrames(@builtin(global_invocation_id) gid: vec3u) {
       }
     }
     prev = lh;
-    if (!ok) { atomicAdd(&stats[0], 1u); }
+    if (!ok) { atomicAdd(&stats[0], select(1u, 2u, partner)); }
     let slice = f * P.width * P.height * 4u;
     let c = coeffs[FRAME_VIEWS + 2u * f];
     let ppu = coeffs[FRAME_VIEWS + 2u * f + 1u].x;
-    for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), rgb, slice, c, ppu); }
-    for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], rgb, slice, c, ppu); }
+    depositRoots(lh, slice, c, ppu);
   }
 }
 

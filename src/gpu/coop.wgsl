@@ -6,12 +6,12 @@
 struct Params {
   degree: u32,      // d: highest term index (polynomial has d+1 coefficient slots)
   numCoeffs: u32,   // k: size of the coefficient set
-  count: u32,       // polynomials in this dispatch
+  count: u32,       // solves in this dispatch
   strideX: u32,     // unused here (roots.wgsl only)
   width: u32,       // histogram width in pixels
   height: u32,      // histogram height in pixels
   maxIter: u32,     // Aberth sweeps cap
-  freeDigits: u32,  // D: digits that vary (d when the leading digit is pinned, else d+1); N = k^D
+  entries: u32,     // chunk entries in `en` (roots.wgsl decode)
   center: vec2f,    // complex value at the canvas centre
   pxPerUnit: f32,   // pixels per unit of the complex plane
   tol: f32,
@@ -23,9 +23,15 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;      // k coefficient values
-// Base-k digits (little-endian, digit i picks a_i): [0..=32] = this dispatch's first index, [33..=65] = stride G.
-@group(0) @binding(2) var<storage, read> digits: array<u32>;
-const STEP: u32 = 33u;  // offset of the stride's digits in `digits` (= MAX_DEG + 1 in roots.wgsl)
+// Enumeration (core/reciprocal.ts packChunk / packPlan), same layout as roots.wgsl.
+@group(0) @binding(2) var<storage, read> en: array<u32>;
+const MAX_SLOTS: u32 = 33u;  // = MAX_DEG + 1 in roots.wgsl
+const MAX_REGIONS: u32 = 32u;
+const ENTRY: u32 = 4u + 2u * MAX_SLOTS;
+const REGION: u32 = 4u + 4u * MAX_SLOTS;
+const REGION_BASE: u32 = MAX_REGIONS * ENTRY;
+const TABLE_BASE: u32 = REGION_BASE + MAX_REGIONS * REGION;
+const MAX_TABLE: u32 = 2048u;
 @group(0) @binding(3) var<storage, read_write> hist: array<atomic<u32>>;  // 4 u32 per pixel: count, r, g, b
 @group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>; // [0] = unconverged ROOTS (per-thread here)
 
@@ -44,6 +50,12 @@ fn finite2(v: vec2f) -> bool {
 fn hue2rgb(h: f32) -> vec3f {
   return clamp(abs(fract(h + vec3f(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, vec3f(0.0), vec3f(1.0));
 }
+fn tbl(i: u32) -> u32 { return en[TABLE_BASE + min(i, MAX_TABLE - 1u)]; }
+fn packRgb(h: f32) -> u32 {
+  let c = vec3u(hue2rgb(h) * 63.0 + 0.5);
+  return c.x | (c.y << 8u) | (c.z << 16u);
+}
+fn unpackRgb(c: u32) -> vec3u { return vec3u(c & 255u, (c >> 8u) & 255u, (c >> 16u) & 255u); }
 fn deposit(r: vec2f, rgb: vec3u) {
   let ix = i32(floor((r.x - P.center.x) * P.pxPerUnit + f32(P.width) * 0.5));
   let iy = i32(floor(f32(P.height) * 0.5 - (r.y - P.center.y) * P.pxPerUnit));
@@ -58,7 +70,7 @@ fn deposit(r: vec2f, rgb: vec3u) {
 const WGS: u32 = 256u;
 var<workgroup> sa: array<vec2f, 512>;    // coefficients of the polys in this workgroup, (d+1) per poly
 var<workgroup> sz: array<vec2f, 256>;    // current root estimates, d per poly
-var<workgroup> sinfo: array<vec4u, 256>; // per poly: lo, hi, packed rgb
+var<workgroup> sinfo: array<vec4u, 256>; // per poly: lo, hi, packed rgb, packed partner rgb | partner << 24
 var<workgroup> wbusy: atomic<u32>;
 var<workgroup> sflag: u32;
 
@@ -74,24 +86,37 @@ fn splatCoop(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index)
   let abase = slot * (d + 1u);
   let zbase = slot * d;
   if (valid && j == 0u) {
-    // Index (first + tid * G) mod k^D, as in roots.wgsl loadPoly.
-    var carry = 0u; var w = 1.0; var h = 0.0;
-    for (var i = 0u; i <= d; i++) {
-      var dg = 0u;
-      if (i < P.freeDigits) {
-        let v = digits[i] + digits[STEP + i] * tid + carry;
-        dg = v % k;
-        carry = v / k;
-      }
-      sa[abase + i] = coeffs[dg];
-      w = w / f32(k); h += f32(dg) * w;
+    // Digits as in roots.wgsl decode, staged as sa[abase + i].x = f32(digit), then replaced by the coefficients.
+    var e = 0u;
+    for (var i = 1u; i < min(P.entries, MAX_REGIONS); i++) {
+      if (en[i * ENTRY] <= tid) { e = i; }
     }
+    let eb = e * ENTRY;
+    let local = tid - en[eb];
+    let rb = REGION_BASE + min(en[eb + 1u], MAX_REGIONS - 1u) * REGION;
+    let slots = min(en[rb], MAX_SLOTS);
+    var carry = 0u;
+    for (var s = 0u; s < slots; s++) {
+      let sb = rb + 4u + 4u * s;
+      let radix = max(en[sb], 1u);
+      let v = en[eb + 4u + s] + en[eb + 4u + MAX_SLOTS + s] * local + carry;
+      let t = tbl(en[sb + 1u] + v % radix);
+      carry = v / radix;
+      sa[abase + min(en[sb + 2u], d)] = vec2f(f32(t & 0xffu), 0.0);
+      sa[abase + min(en[sb + 3u], d)] = vec2f(f32(t >> 8u), 0.0);
+    }
+    let pmap = en[rb + 2u];
+    var w = 1.0; var h = 0.0; var ph = 0.0;
+    for (var i = 0u; i <= d; i++) {
+      w = w / f32(k); h += sa[abase + i].x * w;
+      ph += f32(tbl(pmap + u32(sa[abase + d - i].x))) * w;
+    }
+    for (var i = 0u; i <= d; i++) { sa[abase + i] = coeffs[u32(sa[abase + i].x)]; }
     var hi = d;
     while (hi > 0u && dot(sa[abase + hi], sa[abase + hi]) < 1e-24) { hi--; }
     var lo = 0u;
     while (lo < hi && dot(sa[abase + lo], sa[abase + lo]) < 1e-24) { lo++; }
-    let rgb = vec3u(hue2rgb(h) * 63.0 + 0.5);
-    sinfo[slot] = vec4u(lo, hi, rgb.x | (rgb.y << 8u) | (rgb.z << 16u), 0u);
+    sinfo[slot] = vec4u(lo, hi, packRgb(h), packRgb(ph) | (min(en[rb + 1u], 1u) << 24u));
   }
   workgroupBarrier();
   var info = vec4u(0u);
@@ -150,8 +175,15 @@ fn splatCoop(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_index)
     if (li == 0u) { sflag = atomicLoad(&wbusy); atomicStore(&wbusy, 0u); }
     if (workgroupUniformLoad(&sflag) == 0u) { break; }
   }
-  if (!done) { atomicAdd(&stats[0], 1u); }
-  let rgb = vec3u(info.z & 255u, (info.z >> 8u) & 255u, (info.z >> 16u) & 255u);
-  if (live) { deposit(z, rgb); }
+  // Partner (the reversed polynomial, roots.wgsl depositRoots): root threads also deposit 1/z, threads hi..d-1 its
+  // d - hi roots at the origin.
+  let partner = (info.w >> 24u) != 0u;
+  if (!done) { atomicAdd(&stats[0], select(1u, 2u, partner)); }
+  let rgb = unpackRgb(info.z);
+  if (live) {
+    deposit(z, rgb);
+    if (partner) { deposit(crecip(z), unpackRgb(info.w)); }
+  }
   else if (valid && j < hi) { deposit(vec2f(0.0), rgb); }   // the lo roots at the origin
+  else if (valid && partner) { deposit(vec2f(0.0), unpackRgb(info.w)); }
 }

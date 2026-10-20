@@ -96,6 +96,17 @@ describe('parseMetadata', () => {
     // And the state rebuilds the same metadata fields it came from.
     expect(stateFromMetadata(parseMetadata(JSON.stringify(buildMetadata({ ...input, kind: 'settings' }))))).toEqual(state);
   });
+  it('fractal.enumeration is optional: recorded when given, files without it still load', () => {
+    for (const enumeration of ['reciprocal', 'plain'] as const) {
+      const m = buildMetadata({ ...input, fractal: { ...input.fractal, enumeration } });
+      expect(parseMetadata(JSON.stringify(m)).fractal.enumeration).toBe(enumeration);
+    }
+    const old = parseMetadata(JSON.stringify(buildMetadata(input))); // made before the field existed
+    expect('enumeration' in old.fractal).toBe(false);
+    const bad = JSON.parse(JSON.stringify(buildMetadata(input)));
+    bad.fractal.enumeration = 'halved';
+    expect(() => parseMetadata(JSON.stringify(bad))).toThrow(/fractal\.enumeration must be one of "reciprocal", "plain"/);
+  });
   it('explains what is wrong: not JSON, no schema, newer or unknown schema', () => {
     expect(() => parseMetadata('{oops')).toThrow(/not valid JSON/);
     expect(() => parseMetadata('{"degree": 3}')).toThrow(/no "schema"/);
