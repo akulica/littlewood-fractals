@@ -1,5 +1,8 @@
 import type { Complex } from './complex';
 
+export const MAX_DEGREE = 32; // = MAX_DEG in roots.wgsl
+export const MAX_COEFFS = 16; // = MAX_RINGS in display.wgsl; the coefficient buffer holds 16 per frame
+
 const EPS = 1e-6;
 const abs = (a: Complex) => Math.hypot(a.re, a.im);
 const mul = (a: Complex, b: Complex): Complex => ({ re: a.re * b.re - a.im * b.im, im: a.re * b.im + a.im * b.re });

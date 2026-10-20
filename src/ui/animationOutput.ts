@@ -3,7 +3,10 @@
 // stream to disk (File System Access API: Chrome/Edge); elsewhere the MP4 is built in memory and downloaded.
 import { BufferTarget, Mp4OutputFormat, Output, Quality, StreamTarget, VideoSample, VideoSampleSource, canEncodeVideo } from 'mediabunny';
 import { videoSizeError } from '../core/animation';
-import { encodePng } from '../core/png';
+import { encodePng, type PngText } from '../core/png';
+import { mp4Tags } from './mp4Metadata';
+
+export { readMp4Comment } from './mp4Metadata';
 
 export type OutputKind = 'mp4' | 'mp4+png' | 'png';
 
@@ -32,8 +35,9 @@ export async function mp4Error(width: number, height: number, fps: number): Prom
 }
 
 export interface AnimationWriter {
-  /** Frames arrive in order; the returned promise applies the encoder's / disk's backpressure to the renderer. */
-  frame(rgba: Uint8ClampedArray<ArrayBuffer>, index: number): Promise<void>;
+  /** Frames arrive in order; the returned promise applies the encoder's / disk's backpressure to the renderer.
+   * `texts`: the PNG frame's metadata chunks (made only when PNG frames are written). */
+  frame(rgba: Uint8ClampedArray<ArrayBuffer>, index: number, texts?: () => PngText[]): Promise<void>;
   /** Completes the files; returns a short summary for the status line. */
   finish(): Promise<string>;
   /** After an error or Cancel: drops the unfinished MP4 (PNG frames written so far stay). */
@@ -47,6 +51,8 @@ export interface WriterOptions {
   fps: number;
   /** File name without extension. */
   name: string;
+  /** Reproduction metadata (core/metadata): JSON for the MP4 comment tag and the PNG folder's animation.json. */
+  metadata?: { title: string; json: string; date: Date };
 }
 
 /**
@@ -66,12 +72,19 @@ export async function openAnimationWriter(o: WriterOptions): Promise<AnimationWr
     mp4File = await pickers.showSaveFilePicker({ suggestedName: `${o.name}.mp4`, types: [{ description: 'MP4 video', accept: { 'video/mp4': ['.mp4'] } }] });
   }
   const video = o.kind === 'png' ? null : await openMp4(o, mp4File, dir);
+  if (dir && o.metadata) {
+    // Written first: a cancelled render still documents what its frames are.
+    const file = await dir.getFileHandle('animation.json', { create: true });
+    const w = await file.createWritable();
+    await w.write(o.metadata.json);
+    await w.close();
+  }
   let pngs = 0;
   return {
-    async frame(rgba, index) {
+    async frame(rgba, index, texts) {
       if (video) await video.add(rgba, index);
       if (dir) {
-        const blob = await encodePng(rgba, o.width, o.height);
+        const blob = await encodePng(rgba, o.width, o.height, texts?.());
         const file = await dir.getFileHandle(`frame_${String(index).padStart(5, '0')}.png`, { create: true });
         const w = await file.createWritable();
         await w.write(blob);
@@ -98,6 +111,7 @@ async function openMp4(o: WriterOptions, file: FileSystemFileHandle | null, dir:
   const output = new Output({ format: new Mp4OutputFormat(), target });
   const source = new VideoSampleSource({ codec: 'avc', quality: new Quality({ bitrate: mp4Bitrate(o.width, o.height, o.fps) }) });
   output.addVideoTrack(source, { frameRate: o.fps });
+  if (o.metadata) output.setMetadataTags(mp4Tags(o.metadata.title, o.metadata.json, o.metadata.date));
   await output.start();
   return {
     async add(rgba: Uint8ClampedArray<ArrayBuffer>, index: number) {

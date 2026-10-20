@@ -25,8 +25,9 @@
           <option value="coop">cooperative (thread per root)</option>
         </select>
       </label>
-      <label>Exposure <input id="exposure" type="range" min="0.2" max="3" step="0.05" value="1" /></label>
-      <label>Gamma <input id="gamma" type="range" min="0.2" max="1.5" step="0.05" value="0.6" /></label>
+      <!-- step="any": keyframed exposure/gamma are interpolated, and a stepped slider would round them -->
+      <label>Exposure <input id="exposure" type="range" min="0.2" max="3" step="any" value="1" /></label>
+      <label>Gamma <input id="gamma" type="range" min="0.2" max="1.5" step="any" value="0.6" /></label>
       <div class="row">
         <button id="zoomIn" type="button">Zoom +</button>
         <button id="zoomOut" type="button">Zoom −</button>
@@ -38,13 +39,22 @@
         <input id="exportH" type="number" min="1" value="2160" aria-label="export height" />
         <button id="savePng" type="button">Save PNG</button>
       </div>
+      <label class="check"><input id="rings" type="checkbox" /> Show coefficient rings (Save PNG and animations)</label>
       <output id="exportStatus"></output>
+      <div class="row">
+        <button id="load" type="button" title="Restore the settings stored in a PNG, MP4 or .json made by this app (or drop the file on the page)">Load…</button>
+        <button id="saveSettings" type="button" title="Download the current settings (and keyframes) as JSON">Save settings (.json)</button>
+        <input id="loadFile" type="file" accept=".png,.mp4,.json,image/png,video/mp4,application/json" hidden />
+      </div>
+      <output id="fileStatus"></output>
       <details id="anim">
         <summary>Animation <span id="keyCount"></span></summary>
         <div class="row">
-          <button id="addKey" type="button" title="Store the current coefficients as the next keyframe">Add keyframe</button>
+          <button id="addKey" type="button" title="Store the current coefficients (and view, exposure/gamma if attached) as the next keyframe">Add keyframe</button>
           <button id="clearKeys" type="button">Clear</button>
         </div>
+        <label class="check"><input id="attachView" type="checkbox" checked /> Attach view (zoom + centre)</label>
+        <label class="check"><input id="attachDisplay" type="checkbox" checked /> Attach exposure/gamma</label>
         <ol id="keyList"></ol>
         <input id="timeline" type="range" min="0" max="1" step="0.001" value="0" aria-label="timeline" disabled />
         <div class="row">
@@ -61,8 +71,9 @@
         </label>
         <label>Brightness
           <select id="brightness">
-            <option value="locked">locked to first frame</option>
-            <option value="perFrame">per frame</option>
+            <option value="locked">locked: density per area (zoom-aware)</option>
+            <option value="frame0">locked to frame 0's densest pixel</option>
+            <option value="perFrame">per frame (may pulse)</option>
           </select>
         </label>
         <label>Quality

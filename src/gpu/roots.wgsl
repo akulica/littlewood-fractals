@@ -23,7 +23,8 @@ struct Params {
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
-@group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;      // k coefficient values (splatFrames: frames * k)
+// k coefficient values. splatFrames: frames * k values, then from FRAME_VIEWS two vec2f per frame: centre, (pxPerUnit, 0).
+@group(0) @binding(1) var<storage, read> coeffs: array<vec2f>;
 // Base-k digits (little-endian, digit i picks a_i): [0..=32] = this dispatch's first index, [33..=65] = stride G.
 @group(0) @binding(2) var<storage, read> digits: array<u32>;
 @group(0) @binding(3) var<storage, read_write> hist: array<atomic<u32>>;  // 4 u32 per pixel: count, r, g, b (splatFrames: one W*H slice per frame)
@@ -48,6 +49,7 @@ fn finite2(v: vec2f) -> bool {
 }
 
 const STEP: u32 = MAX_DEG + 1u;  // offset of the stride's digits in `digits`
+const FRAME_VIEWS: u32 = 128u;   // = MAX_COEFFS * MAX_BATCH_FRAMES in engine.ts: per-frame views follow the coefficients
 
 // Fills a[0..=degree] for polynomial number (first + tid * G) mod k^D, digit by digit with carry. Every digit
 // value stays below 2 (k-1) count < 2^32 (Engine asserts it). The carry out of digit D-1 is dropped, which is
@@ -173,11 +175,11 @@ fn hue2rgb(h: f32) -> vec3f {
   return clamp(abs(fract(h + vec3f(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, vec3f(0.0), vec3f(1.0));
 }
 
-// slice: u32 offset of the frame's histogram (0 except in splatFrames).
-fn deposit(r: vec2f, rgb: vec3u, slice: u32) {
+// slice: u32 offset of the frame's histogram (0 except in splatFrames). c, ppu: the frame's view (animations zoom and pan).
+fn deposit(r: vec2f, rgb: vec3u, slice: u32, c: vec2f, ppu: f32) {
   // Integer bounds check: WGSL may assume no NaN, so never rely on float comparisons to reject NaN.
-  let ix = i32(floor((r.x - P.center.x) * P.pxPerUnit + f32(P.width) * 0.5));
-  let iy = i32(floor(f32(P.height) * 0.5 - (r.y - P.center.y) * P.pxPerUnit));
+  let ix = i32(floor((r.x - c.x) * ppu + f32(P.width) * 0.5));
+  let iy = i32(floor(f32(P.height) * 0.5 - (r.y - c.y) * ppu));
   if (ix < 0 || iy < 0 || ix >= i32(P.width) || iy >= i32(P.height)) { return; }
   let idx = slice + (u32(iy) * P.width + u32(ix)) * 4u;
   atomicAdd(&hist[idx], 1u);
@@ -194,8 +196,8 @@ fn splat(@builtin(global_invocation_id) gid: vec3u) {
   let lh = loadPoly(tid);
   if (!solve(lh.x, lh.y)) { atomicAdd(&stats[0], 1u); }
   let rgb = vec3u(hue2rgb(hue) * 63.0 + 0.5);  // 6-bit so a pixel can take 68M roots before u32 overflow
-  for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), rgb, 0u); }
-  for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], rgb, 0u); }
+  for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), rgb, 0u, P.center, P.pxPerUnit); }
+  for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], rgb, 0u, P.center, P.pxPerUnit); }
 }
 
 // Animation: one thread follows its polynomial through P.frames frames (frame f uses coeffs[f*k ..] and histogram
@@ -225,8 +227,10 @@ fn splatFrames(@builtin(global_invocation_id) gid: vec3u) {
     prev = lh;
     if (!ok) { atomicAdd(&stats[0], 1u); }
     let slice = f * P.width * P.height * 4u;
-    for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), rgb, slice); }
-    for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], rgb, slice); }
+    let c = coeffs[FRAME_VIEWS + 2u * f];
+    let ppu = coeffs[FRAME_VIEWS + 2u * f + 1u].x;
+    for (var j = 0u; j < lh.x; j++) { deposit(vec2f(0.0), rgb, slice, c, ppu); }
+    for (var j = 0u; j < lh.y - lh.x; j++) { deposit(z[j], rgb, slice, c, ppu); }
   }
 }
 

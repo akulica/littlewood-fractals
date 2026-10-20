@@ -11,5 +11,5 @@
     "isolatedModules": true,
     "noUnusedLocals": true
   },
-  "include": ["src", "tests", "vite.config.ts", "vitest.perf.config.ts"]
+  "include": ["src", "tests", "vite.config.ts", "vitest.perf.config.ts", "node-shims.d.ts"]
 }

@@ -8,13 +8,13 @@ import {
   keyframeTime,
   pinnable,
   videoSizeError,
-  type Keyframe,
+  type CoeffSet,
 } from '../src/core/animation';
 
 const c = (re: number, im = 0) => ({ re, im });
-const A: Keyframe = [c(1), c(-1)];
-const B: Keyframe = [c(1), c(0, 1)];
-const C: Keyframe = [c(1), c(1, 1)];
+const A: CoeffSet = [c(1), c(-1)];
+const B: CoeffSet = [c(1), c(0, 1)];
+const C: CoeffSet = [c(1), c(1, 1)];
 const linear = { easing: 'linear', loop: false } as const;
 
 describe('interpolateAt', () => {

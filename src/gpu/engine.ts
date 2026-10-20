@@ -3,16 +3,17 @@ import coopSrc from './coop.wgsl?raw';
 import displaySrc from './display.wgsl?raw';
 import { MAX_BATCH_FRAMES } from '../core/animation';
 import type { Complex } from '../core/complex';
-import { goldenStride, indexToDigits, leadingFixable, sampleIndex, totalPolys } from '../core/enumeration';
+import { MAX_COEFFS, MAX_DEGREE, goldenStride, indexToDigits, leadingFixable, sampleIndex, totalPolys } from '../core/enumeration';
 import { chooseKernel, coopGrid, dispatchGrid, nextBudget, type Kernel } from '../core/schedule';
 import type { View } from '../core/view';
 
-export const MAX_DEGREE = 32; // = MAX_DEG in roots.wgsl
-export const MAX_COEFFS = 16;
-const TOL = 1e-5; // backward-error stop (measured: 1e-6..3e-5 all converge; 1e-5 is fastest without visible change)
+export { MAX_COEFFS, MAX_DEGREE };
+export const TOL = 1e-5; // backward-error stop (measured: 1e-6..3e-5 all converge; 1e-5 is fastest without visible change)
 const PARAMS_BYTES = 64;
 const STEP_OFFSET = MAX_DEGREE + 1; // = STEP in the shaders: the stride's digits follow the start digits
-const VIEW_BYTES = 32;
+const VIEW_BYTES = 176; // = struct View in display.wgsl: 12 scalars + 4 pad, then 8 vec4f of ring centres
+const MAX_RINGS = 16; // = MAX_RINGS in display.wgsl
+const FRAME_VIEWS = MAX_COEFFS * MAX_BATCH_FRAMES; // = FRAME_VIEWS in roots.wgsl: vec2f index of the per-frame views
 const REDUCE_GROUPS = 256;
 const CAL_DEGREE = 20; // calibration workload: 2^18 Littlewood polynomials of degree 20 (~15-70 ms per run)
 const CAL_POLYS = 1 << 18;
@@ -35,6 +36,14 @@ export interface FractalParams {
   maxIter: number;
 }
 
+/** Coefficient rings drawn over an export, like the screen's handles. */
+export interface RingOverlay {
+  /** Ring centres in output pixels (core/view worldToPixel); at most 16 are drawn. */
+  centres: { x: number; y: number }[];
+  /** Output px per CSS px: rings, border and halo scale like a screenshot taken at the export's resolution. */
+  scale: number;
+}
+
 export interface DisplayParams {
   colorMode: 0 | 1;
   exposure: number;
@@ -44,6 +53,8 @@ export interface DisplayParams {
   countScale?: number;
   /** > 0: tone-map against this root count instead of the frame's densest pixel (animation: locked brightness). */
   fixedMax?: number;
+  /** Exports only (the live view has DOM handles). */
+  rings?: RingOverlay;
 }
 
 /** One splatFrames batch: up to MAX_BATCH_FRAMES coefficient sets of equal size k, solved per polynomial in turn. */
@@ -54,6 +65,8 @@ export interface FramesParams {
   maxIter: number;
   /** Pin the leading digit in every frame (core/animation pinnable(): decided once for the whole animation). */
   pinned: boolean;
+  /** Per-frame views (animations that zoom or pan); default: `view` for every frame. */
+  views?: View[];
 }
 
 /**
@@ -114,7 +127,8 @@ export class Engine {
     });
     const U = GPUBufferUsage;
     this.paramsBuf = device.createBuffer({ size: PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
-    this.coeffBuf = device.createBuffer({ size: MAX_COEFFS * MAX_BATCH_FRAMES * 8, usage: U.STORAGE | U.COPY_DST });
+    // Coefficients of up to MAX_BATCH_FRAMES frames, then two vec2f per frame for splatFrames' per-frame views.
+    this.coeffBuf = device.createBuffer({ size: (FRAME_VIEWS + 2 * MAX_BATCH_FRAMES) * 8, usage: U.STORAGE | U.COPY_DST });
     this.digitsBuf = device.createBuffer({ size: 2 * STEP_OFFSET * 4, usage: U.STORAGE | U.COPY_DST });
     this.statsBuf = device.createBuffer({ size: 16, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
     this.viewBuf = device.createBuffer({ size: VIEW_BYTES, usage: U.UNIFORM | U.COPY_DST });
@@ -197,7 +211,10 @@ export class Engine {
     this.setParams({ coeffs: p.frames[0], degree: p.degree, view: p.view, maxIter: p.maxIter }); // validates degree and k
     this.total = totalPolys(k, p.degree, p.pinned);
     this.freeDigits = p.pinned ? p.degree : p.degree + 1;
+    if (p.views && p.views.length !== n) throw new RangeError('need one view per frame');
     this.device.queue.writeBuffer(this.coeffBuf, 0, new Float32Array(p.frames.flatMap((f) => f.flatMap((c) => [c.re, c.im]))));
+    const views = p.views ?? p.frames.map(() => p.view);
+    this.device.queue.writeBuffer(this.coeffBuf, FRAME_VIEWS * 8, new Float32Array(views.flatMap((v) => [v.cx, v.cy, v.pxPerUnit, 0])));
     this.framesPipe ??= this.device.createComputePipeline({ layout: 'auto', compute: { module: this.rootsModule, entryPoint: 'splatFrames' } });
     this.frameCount = n;
     this.framesTarget = target;
@@ -286,8 +303,10 @@ export class Engine {
   encodeDisplay(enc: GPUCommandEncoder, target: GPUTextureView, d: DisplayParams): void {
     if (!this.reduceBG || !this.renderBG) return;
     const ab = new ArrayBuffer(VIEW_BYTES);
-    new Uint32Array(ab).set([this.width, this.height, d.colorMode, 0]);
-    new Float32Array(ab).set([d.exposure, d.gamma, d.countScale ?? 1, d.fixedMax ?? 0], 4);
+    const rings = d.rings?.centres.slice(0, MAX_RINGS) ?? [];
+    new Uint32Array(ab).set([this.width, this.height, d.colorMode, rings.length]);
+    new Float32Array(ab).set([d.exposure, d.gamma, d.countScale ?? 1, d.fixedMax ?? 0, d.rings?.scale ?? 1], 4);
+    new Float32Array(ab).set(rings.flatMap((r) => [r.x, r.y]), 12);
     this.device.queue.writeBuffer(this.viewBuf, 0, ab);
     enc.clearBuffer(this.maxBuf);
     const c = enc.beginComputePass();

@@ -8,7 +8,7 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 
 - **Node.js 20+** (for the dev server, build and tests).
 - **A WebGPU browser** to use the app (see *Browser support*). It must be opened via `localhost` or `https://`, because WebGPU is disabled on plain `http://` from other hosts.
-- **A real GPU for `npm test`:** the GPU tests run the WGSL kernels through Dawn (the `webgpu` npm package, prebuilt for Windows/macOS/Linux x64). On a machine without a usable GPU, only the 8 pure-logic test files pass.
+- **A real GPU for `npm test`:** the GPU tests run the WGSL kernels through Dawn (the `webgpu` npm package, prebuilt for Windows/macOS/Linux x64). On a machine without a usable GPU, only the 11 pure-logic test files pass.
 - **Windows PowerShell:** if `npm` fails with *"running scripts is disabled on this system"*, either use `npm.cmd` (e.g. `npm.cmd run dev`) or run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
 ## Run
@@ -16,7 +16,7 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 ```bash
 npm install
 npm run dev       # http://localhost:5173  (WebGPU needs https:// or localhost)
-npm test          # 99 tests: pure logic + real-GPU tests via Dawn (no browser needed)
+npm test          # 135 tests: pure logic + real-GPU tests via Dawn (no browser needed)
 npm run bench     # throughput + kernel-variant benchmark on this machine's GPU
 npm run build     # static site in dist/
 ```
@@ -33,10 +33,12 @@ npm run build     # static site in dist/
 | Pan / zoom | Drag the background / mouse wheel (zooms around the cursor) / **Zoom ±** / **Reset view** |
 | Colour | Hue by low-order coefficients (Egan's palette idea), or inferno density. Exposure and gamma apply instantly, without recomputing. |
 | Kernel | **auto** (default) times both GPU kernels at startup and keeps the faster one. The choice and the measured ratio are shown in the status line. You can also force either kernel. |
-| Save PNG | Type the width × height, then **Save PNG**. The image is re-rendered at that size (never upscaled), shows everything currently on screen (extra margin if the aspect differs), and matches the screen's brightness. Up to 64 M pixels (e.g. 8192×8192 or 16384×4096) within the GPU's limits. Live rendering pauses while it exports. |
-| Animation keyframes | Open **Animation**. Set the coefficients, **Add keyframe**, move them, add the next one; any number of keyframes (at least 2). Each coefficient moves in a straight line from keyframe to keyframe, with equal time per segment. Ghost rings and dashed lines on the picture show the keyframes and the paths. Click a keyframe to jump to it, × to remove it, **Clear** to start over. Changing the number of coefficients clears the keyframes. |
-| Timeline | Drag the slider to scrub: the live view shows that moment (as a sampled preview, like dragging a handle). **▶ Preview** plays the frames the render will use, at the chosen FPS, looping. |
-| Animation settings | **Loop back to start** adds the first keyframe at the end and drops the duplicate last frame, so the video loops seamlessly. **Frames**, **FPS**. **Easing**: smooth (slow start and end) or linear. **Brightness**: locked to the first frame (default) or per frame. **Quality**: 100 % for the final video; 50/25/10 % drafts render only that share of the polynomials per frame (an even sample, so the draft is noisier but otherwise the same picture). |
+| Save PNG | Type the width × height, then **Save PNG**. The image is re-rendered at that size (never upscaled), shows everything currently on screen (extra margin if the aspect differs), and matches the screen's brightness. Up to 64 M pixels (e.g. 8192×8192 or 16384×4096) within the GPU's limits. Live rendering pauses while it exports. The PNG carries the full settings (see *Reproduction metadata*). |
+| Coefficient rings | **Show coefficient rings** (off by default) draws the white handle rings into Save PNG and animation frames, sized like a screenshot of the screen at the export's resolution. In animations they follow each frame's coefficients. |
+| Save settings / Load | **Save settings (.json)** downloads the current state (coefficients, degree, view, display, export size, keyframes and animation settings). **Load…**, or dropping a file anywhere on the page, restores it from such a JSON, from a PNG saved by the app, or from a rendered MP4. |
+| Animation keyframes | Open **Animation**. Set the coefficients, **Add keyframe**, move them, add the next one; any number of keyframes (at least 2). Each coefficient moves in a straight line from keyframe to keyframe, with equal time per segment. With **Attach view (zoom + centre)** (on by default) a keyframe also stores what is on screen, so the animation can zoom and pan; with **Attach exposure/gamma** (on by default) it stores the two sliders. The list marks them 📷 (view) and ◐ (exposure/gamma). Ghost rings and dashed lines on the picture show the keyframes and the paths. Click a keyframe to jump to it (coefficients, view, exposure/gamma), × to remove it, **Clear** to start over. Changing the number of coefficients clears the keyframes. |
+| Timeline | Drag the slider to scrub: the live view shows that moment, including the view and exposure/gamma (as a sampled preview, like dragging a handle). **▶ Preview** plays the frames the render will use, at the chosen FPS, looping. |
+| Animation settings | **Loop back to start** adds the first keyframe at the end and drops the duplicate last frame, so the video loops seamlessly. **Frames**, **FPS**. **Easing**: smooth (slow start and end) or linear. **Brightness**: *locked: density per area* (default; zoom-aware, see *View keyframes*), *locked to frame 0's densest pixel* (the old mode; zooming in darkens), or *per frame* (may pulse). **Quality**: 100 % for the final video; 50/25/10 % drafts render only that share of the polynomials per frame (an even sample, so the draft is noisier but otherwise the same picture). |
 | Render animation | Size comes from the Save PNG W × H. **Output**: MP4 (H.264), MP4 + PNG frames, or PNG frames (`frame_00000.png`…; folder outputs need Chrome/Edge). You choose the file or folder first, then every frame is rendered at full size and written as it is finished. The status shows progress, ms/frame and the time left; **Cancel** stops it. Live rendering pauses meanwhile. |
 
 ## Browser support
@@ -107,12 +109,55 @@ Root counts are multiplied by (export px ÷ screen px)² before tone-mapping, so
   - Compared with cold renders: 0 unconverged, the same root counts, and 0.05–0.1 % of roots land one pixel over (f32 edge noise).
 - **Batch size.** 8 frames per batch was fastest on both GPUs (4 and 16 are slower: bigger batches lose histogram cache locality). A batch keeps one histogram per frame on the GPU, capped at 512 MB, so 4K renders use batches of 4 frames.
 - **Locked brightness.** Without it the video pulses: the densest pixel changes 1.3–1.5× between adjacent frames, up and down. By default every frame is therefore tone-mapped against frame 0's densest pixel. Per-frame normalisation is still available.
-- **Same look as the screen.** The animation uses the current view, colour, exposure and gamma, and the same brightness scaling as Save PNG.
+- **Same look as the screen.** The animation uses the current colour, the same brightness scaling as Save PNG, and the current view and exposure/gamma unless keyframes carry their own.
 - **Symmetry pinning** is decided once per animation: only if every frame allows it. Otherwise root multiplicity, and with it brightness, would jump between frames.
 - **Outputs.**
   - MP4: H.264 via the browser's WebCodecs encoder, muxed by [mediabunny](https://mediabunny.dev) at about 0.25 bit per pixel per frame (1080p30 ≈ 15.6 Mbit/s). The size is checked up front: H.264 needs even width and height, and hardware encoders often stop around 4096 px.
   - Where the browser can write files (Chrome/Edge), the MP4 streams straight to the chosen file, so long videos never sit in memory. Elsewhere it is built in memory and downloaded.
   - PNG frames are written into the chosen folder as each frame finishes.
+
+## View keyframes
+
+- **Stored as the visible world rectangle** (centre plus half-width and half-height), not as `pxPerUnit`. `pxPerUnit` depends on the window size and devicePixelRatio when the keyframe was taken, so resizing the window between keyframes would silently change the framing. Each frame fits its rectangle into W×H (contain), exactly as Save PNG fits the screen.
+- **Zoom is geometric** (linear in log scale). Rejected, linear in scale: a 1×→100× zoom would spend half the time between 1× and 50×, then crawl at the end.
+- **The centre is anchored to the more zoomed-in keyframe.** Its on-screen offset from the frame centre shrinks (or grows) linearly while the zoom changes geometrically:
+  - zooming in toward c₂: `c(t) = c₂ + (c₁ − c₂)·(s₁/s(t))·(1−t)`;
+  - zooming out: the mirror image, anchored at c₁;
+  - equal zoom: plain linear panning.
+- Rejected, linear centre + geometric zoom: zooming 1→1000× toward a point 1 unit away puts the target about 16 screen widths off-screen mid-segment; it flies out, then snaps back.
+- Rejected, van Wijk–Nuij "optimal" zoom-pan: it zooms *out* during long pans even when both keyframes have the same zoom, which is surprising for precise keyframing.
+- **Keyframes without a view** take the view interpolated between the nearest keyframes that have one (with **Loop**, wrapping around). If no keyframe has a view, the current screen view is used. Exposure/gamma work the same way: exposure geometrically (it multiplies), gamma linearly. Easing and loop apply to every channel.
+- **Brightness with zoom.** A pixel at zoom s covers 1/s² of the plane, so roots per pixel fall about s²-fold when zooming in, and a video locked to frame 0's brightest pixel fades to black. The default *density per area* lock scales each frame's counts by `(s_f / s_0)²` (on top of Save PNG's export factor) and keeps frame 0's reference, so regions of constant root density keep their brightness: in `tests/gpu/exportFeatures.test.ts` a 4× zoom stays within 0.5 % of frame 0, while the frame-0 lock drops it to 78 %. Caveats: at deep zoom, peaks that frame 0 averaged away can clip to full brightness (per-frame mode is still there), and deep zooms get **grainy**: most roots land off-screen, so a 30× zoom at degree 20 leaves few roots per pixel. Raising the degree is the remedy.
+- **Rendering.** `splatFrames` reads a view per frame (stored after the coefficients in the same buffer), so a zooming batch still warm-starts.
+
+## Coefficient rings
+
+- Drawn by `display.wgsl`'s fragment shader over the tone-mapped colour: up to 16 ring centres (in output pixels) and the scale sit in the display uniform.
+- The look copies the screen's `.handle`: a white ring spanning radius 9–11 CSS px with a soft 50 % black halo outside it (the CSS `box-shadow: 0 0 4px #000`), anti-aliased over one output pixel with `smoothstep`.
+- Sizes are CSS px × (export px per CSS px), so an export looks like a screenshot of the screen at its resolution: big exports get big rings, small ones tiny rings.
+- Rejected, compositing on the CPU after readback: it would duplicate work per frame, need its own anti-aliasing, and miss the video path's GPU timing. The live view keeps its DOM handles.
+
+## Reproduction metadata
+
+Every export records how to make it again, as JSON with schema `littlewood-fractals/1` (`src/core/metadata.ts`):
+- **build:** package version, `git describe --always --dirty` and build time (injected by Vite `define` at build / dev-server start; `unknown` without git);
+- **environment:** GPU adapter (vendor, architecture, device, description), user agent, timestamp;
+- **fractal:** coefficients at full double precision, degree, `maxIter`, tolerance, pinned or not, enumeration order, kernel actually used;
+- **screen** (centre, `pxPerUnit`, canvas size, dpr) and the **output's own view** (centre, `pxPerUnit` in output pixels, W×H);
+- **display:** colour mode, exposure, gamma, `countScale`, rings;
+- **animation:** the keyframes exactly as stored, frames, fps, loop, easing, brightness, draft quality, batch size, codec and bitrate; each PNG frame adds its index and its interpolated coefficients, view, exposure/gamma, `countScale` and `fixedMax`.
+
+Where it goes:
+- **PNG:** an `iTXt` chunk with keyword `littlewood-fractals` (uncompressed UTF-8 JSON), plus standard `tEXt` `Software` and `Description` (one human-readable line: degree, coefficients, centre, zoom). Any PNG tool shows them, e.g. `exiftool`.
+- **MP4:** the JSON in the `comment` tag (the `©cmt` atom; `ffprobe -show_format` prints it), plus `title` and `date`.
+- **PNG frame folder:** `animation.json` next to the frames, and each frame's own PNG chunks.
+- **Save settings (.json):** the same record for the current state, with the export size and view Save PNG would use.
+
+Reproducibility: the same parameters on the same GPU and driver give a bit-identical image. A different GPU family gives up to about 0.1 % of roots one pixel over (f32 rounding, measured between kernels and GPUs). That's why the adapter and the kernel are recorded.
+
+## Load
+
+**Load…** or a file dropped on the page reads the metadata from a PNG (`iTXt` chunk), an MP4 (comment tag, read with mediabunny's `Input`) or a settings JSON, validates it and restores coefficients, degree, view, colour/exposure/gamma, rings, export size, keyframes and animation settings. The recorded screen rectangle is fitted to the current window, so the same region is shown whatever the window size. Unknown or newer schemas and malformed fields are refused with a message naming the problem (e.g. `fractal.degree must be a whole number in 1..32`). If the file was made by another build or on another GPU, a note says so (results may differ slightly, see above). A file without an animation keeps the current keyframes if they have the same number of coefficients. The kernel choice is not restored: auto picks the fastest one for this GPU.
 
 ## How it works
 

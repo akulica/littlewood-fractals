@@ -1,13 +1,41 @@
 import './style.css';
-import { frameTime, framesFor, interpolateAt, keyframeTime, type Easing, type Keyframe, type PathOptions } from '../core/animation';
+import { BUILD_INFO } from '../buildInfo';
+import {
+  batchFrames,
+  frameTime,
+  keyframeTime,
+  pinnable,
+  stateAt,
+  statesFor,
+  type Brightness,
+  type Easing,
+  type Keyframe,
+  type PathFallback,
+  type PathOptions,
+  type PathState,
+} from '../core/animation';
 import { formatComplex, parseCoefficientList, type Complex } from '../core/complex';
+import { leadingFixable } from '../core/enumeration';
 import { exportSizeError, exportView } from '../core/export';
-import { encodePng } from '../core/png';
+import {
+  PNG_KEYWORD,
+  buildMetadata,
+  describe,
+  environmentNotes,
+  metadataTexts,
+  parseMetadata,
+  stateFromMetadata,
+  type AnimationRecord,
+  type GpuInfo,
+  type Metadata,
+  type MetadataInput,
+} from '../core/metadata';
+import { encodePng, readPngTexts } from '../core/png';
 import { nextBudget, type Kernel } from '../core/schedule';
-import { fitView, panBy, pixelToWorld, worldToPixel, zoomAt, type View } from '../core/view';
+import { fitRect, fitView, panBy, pixelToWorld, viewRect, worldToPixel, zoomAt, type View, type ViewRect } from '../core/view';
 import { renderAnimation, type DraftQuality } from '../gpu/animation';
 import { getDevice } from '../gpu/device';
-import { Engine, MAX_COEFFS, MAX_DEGREE, renderImage, type Calibration, type DisplayParams } from '../gpu/engine';
+import { Engine, MAX_COEFFS, MAX_DEGREE, TOL, renderImage, type Calibration, type DisplayParams } from '../gpu/engine';
 import type { AnimationWriter, OutputKind } from './animationOutput';
 
 const TARGET_MS = 12; // GPU time per frame while interacting; leaves headroom for 60 Hz
@@ -27,12 +55,19 @@ const statusOut = el<HTMLOutputElement>('status');
 const exportWInput = el<HTMLInputElement>('exportW');
 const exportHInput = el<HTMLInputElement>('exportH');
 const saveButton = el<HTMLButtonElement>('savePng');
+const ringsInput = el<HTMLInputElement>('rings');
 const exportStatus = el<HTMLOutputElement>('exportStatus');
+const loadButton = el<HTMLButtonElement>('load');
+const loadFileInput = el<HTMLInputElement>('loadFile');
+const saveSettingsButton = el<HTMLButtonElement>('saveSettings');
+const fileStatus = el<HTMLOutputElement>('fileStatus');
 const keyPaths = document.getElementById('keyPaths') as unknown as SVGSVGElement;
 const keyCountOut = el<HTMLSpanElement>('keyCount');
 const keyList = el<HTMLOListElement>('keyList');
 const addKeyButton = el<HTMLButtonElement>('addKey');
 const clearKeysButton = el<HTMLButtonElement>('clearKeys');
+const attachViewInput = el<HTMLInputElement>('attachView');
+const attachDisplayInput = el<HTMLInputElement>('attachDisplay');
 const timeline = el<HTMLInputElement>('timeline');
 const playButton = el<HTMLButtonElement>('play');
 const loopInput = el<HTMLInputElement>('loop');
@@ -61,6 +96,14 @@ const fmtPct = (p: number) => (p >= 0.1 || p === 0 ? p.toFixed(1) : p.toPrecisio
 const sameView = (a: View, b: View) => a.cx === b.cx && a.cy === b.cy && a.pxPerUnit === b.pxPerUnit;
 const sameCoeffs = (a: Complex[], b: Complex[]) => a.length === b.length && a.every((c, i) => c.re === b[i].re && c.im === b[i].im);
 
+const download = (blob: Blob, name: string) => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+};
+
 const fmtTime = (s: number) => (s < 120 ? `${s.toFixed(0)} s` : s < 7200 ? `${(s / 60).toFixed(0)} min` : `${(s / 3600).toFixed(1)} h`);
 
 async function start(): Promise<void> {
@@ -71,6 +114,9 @@ async function start(): Promise<void> {
   if (!ctx) throw new Error('Could not create a WebGPU canvas context.');
   ctx.configure({ device, format, alphaMode: 'opaque' });
   const engine = new Engine(device, format);
+  // Recorded in every export: f32 rounding differs slightly between GPU families (and kernels).
+  const info: GPUAdapterInfo | undefined = device.adapterInfo; // undefined in browsers older than GPUDevice.adapterInfo
+  const gpu: GpuInfo = { vendor: info?.vendor ?? '', architecture: info?.architecture ?? '', device: info?.device ?? '', description: info?.description ?? '' };
 
   let coeffs: Complex[] = parseCoefficientList(coeffInput.value) ?? [{ re: 1, im: 0 }, { re: -1, im: 0 }];
   let degree = Number(degreeInput.value);
@@ -86,9 +132,10 @@ async function start(): Promise<void> {
   let rootsPerSec = 0;
   let wheelTimer = 0;
   let applied: { coeffs: Complex[]; degree: number; view: View } | null = null; // what the engine accumulates
-  let keys: Keyframe[] = []; // animation keyframes, all of length coeffs.length
+  let keys: Keyframe[] = []; // animation keyframes, all with coeffs.length coefficients
   let playing = false; // ▶ Preview: the timeline drives the coefficients; computes like an interaction meanwhile
   let animAbort: AbortController | null = null;
+  let ready = false; // calibration done: Load may restart the engine from now on
 
   const display = (): DisplayParams => ({
     colorMode: colorSelect.value === '0' ? 0 : 1,
@@ -96,6 +143,7 @@ async function start(): Promise<void> {
     gamma: Number(gammaInput.value),
   });
   const dpr = () => canvas.width / canvas.clientWidth;
+  const screenRect = (): ViewRect => viewRect(view!, canvas.width, canvas.height);
   const eventToPixel = (e: PointerEvent | WheelEvent) => {
     const r = canvas.getBoundingClientRect();
     return { x: (e.clientX - r.left) * dpr(), y: (e.clientY - r.top) * dpr() };
@@ -178,14 +226,15 @@ async function start(): Promise<void> {
       const p = worldToPixel(view!, canvas.width, canvas.height, c.re, c.im);
       return { x: p.x / dpr(), y: p.y / dpr() };
     };
-    const path = loopInput.checked && keys.length > 1 ? [...keys, keys[0]] : keys;
-    for (let j = 0; j < keys[0].length; j++) {
+    const sets = keys.map((key) => key.coeffs);
+    const path = loopInput.checked && sets.length > 1 ? [...sets, sets[0]] : sets;
+    for (let j = 0; j < sets[0].length; j++) {
       const line = document.createElementNS(SVG_NS, 'polyline');
       line.setAttribute('class', 'path');
-      line.setAttribute('points', path.map((key) => { const p = at(key[j]); return `${p.x},${p.y}`; }).join(' '));
+      line.setAttribute('points', path.map((set) => { const p = at(set[j]); return `${p.x},${p.y}`; }).join(' '));
       keyPaths.appendChild(line);
-      for (const key of keys) {
-        const p = at(key[j]);
+      for (const set of sets) {
+        const p = at(set[j]);
         const ring = document.createElementNS(SVG_NS, 'circle');
         ring.setAttribute('class', 'ghost');
         ring.setAttribute('cx', String(p.x));
@@ -256,7 +305,7 @@ async function start(): Promise<void> {
     const ok = list !== null && list.length <= MAX_COEFFS;
     coeffInput.classList.toggle('invalid', !ok);
     if (list && ok) {
-      if (keys.length > 0 && list.length !== keys[0].length) {
+      if (keys.length > 0 && list.length !== keys[0].coeffs.length) {
         // Keyframes interpolate coefficient by coefficient: they only make sense for one coefficient count.
         keys = [];
         stopPlay();
@@ -341,6 +390,31 @@ async function start(): Promise<void> {
     });
   }
 
+  // ---- reproduction metadata (core/metadata): recorded in every export, restored by Load ----
+  function metaInput(
+    kind: MetadataInput['kind'],
+    o: { pinned: boolean; kernel: string; display: DisplayParams } & Pick<MetadataInput, 'output' | 'animation' | 'frame'>,
+  ): MetadataInput {
+    return {
+      kind,
+      build: BUILD_INFO,
+      environment: { gpu, userAgent: navigator.userAgent, timestamp: new Date().toISOString() },
+      fractal: { coeffs, degree, maxIter: MAX_ITER, tol: TOL, pinned: o.pinned, ordering: engine.ordering, kernel: o.kernel },
+      screen: { cx: view!.cx, cy: view!.cy, pxPerUnit: view!.pxPerUnit, width: canvas.width, height: canvas.height, dpr: dpr() },
+      output: o.output,
+      display: {
+        colorMode: o.display.colorMode,
+        exposure: o.display.exposure,
+        gamma: o.display.gamma,
+        countScale: o.display.countScale ?? 1,
+        rings: ringsInput.checked,
+        ...(o.display.fixedMax ? { fixedMax: o.display.fixedMax } : {}),
+      },
+      animation: o.animation,
+      frame: o.frame,
+    };
+  }
+
   // ---- PNG export: re-render at the requested size off-screen (a private histogram), never upscale ----
   function setExportStatus(text: string, isError = false): void {
     exportStatus.textContent = text;
@@ -359,25 +433,25 @@ async function start(): Promise<void> {
     try {
       const outView = exportView(view, canvas.width, canvas.height, width, height);
       const density = outView.pxPerUnit / view.pxPerUnit; // export pixels per screen pixel, per axis
+      const imageDisplay: DisplayParams = {
+        ...display(),
+        countScale: density * density, // same brightness as on screen
+        // Ring size in CSS px, like the handles: export px per CSS px = export px per screen px x dpr.
+        rings: ringsInput.checked ? { scale: density * dpr(), centres: coeffs.map((c) => worldToPixel(outView, width, height, c.re, c.im)) } : undefined,
+      };
+      const meta = buildMetadata(
+        metaInput('image', { pinned: leadingFixable(coeffs), kernel: engine.kernel, output: { ...outView, width, height }, display: imageDisplay }),
+      );
       const rgba = await renderImage(
         device,
-        {
-          kernel: engine.kernel,
-          params: { coeffs, degree, view: outView, maxIter: MAX_ITER },
-          display: { ...display(), countScale: density * density }, // same brightness as on screen
-          width,
-          height,
-        },
+        { kernel: engine.kernel, params: { coeffs, degree, view: outView, maxIter: MAX_ITER }, display: imageDisplay, width, height },
         (done, total) => setExportStatus(`exporting ${width}×${height}: ${(Number((done * 1000n) / total) / 10).toFixed(1)} %`),
       );
       setExportStatus(`encoding PNG…`);
-      const blob = await encodePng(rgba, width, height);
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `littlewood-d${degree}-k${coeffs.length}-${width}x${height}.png`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
-      setExportStatus(`saved ${a.download} (${(blob.size / 2 ** 20).toFixed(1)} MB, ${((performance.now() - t0) / 1000).toFixed(1)} s)`);
+      const blob = await encodePng(rgba, width, height, metadataTexts(meta));
+      const name = `littlewood-d${degree}-k${coeffs.length}-${width}x${height}.png`;
+      download(blob, name);
+      setExportStatus(`saved ${name} (${(blob.size / 2 ** 20).toFixed(1)} MB, ${((performance.now() - t0) / 1000).toFixed(1)} s)`);
     } catch (err) {
       setExportStatus(`export failed: ${err instanceof Error ? err.message : String(err)}`, true);
     } finally {
@@ -388,10 +462,14 @@ async function start(): Promise<void> {
   });
   exportWInput.max = exportHInput.max = String(device.limits.maxTextureDimension2D);
 
-  // ---- animation: keyframes -> interpolated coefficient sets -> one full render per frame -> MP4 / PNG frames ----
+  // ---- animation: keyframes -> interpolated states (coefficients, view, exposure/gamma) -> one full render per frame -> MP4 / PNG frames ----
   const pathOpts = (): PathOptions => ({ easing: easingSelect.value as Easing, loop: loopInput.checked });
   const frameCount = () => Math.min(100_000, Math.max(2, Math.round(Number(framesInput.value)) || 2));
   const fps = () => Math.min(120, Math.max(1, Math.round(Number(fpsInput.value)) || 30));
+  // Channels no keyframe carries stay as they are on screen.
+  const fallback = (): PathFallback => ({ view: screenRect(), exposure: Number(exposureInput.value), gamma: Number(gammaInput.value) });
+  const hasViewKeys = () => keys.some((k) => k.view);
+  const hasDisplayKeys = () => keys.some((k) => k.exposure !== undefined && k.gamma !== undefined);
   function setAnimStatus(text: string, isError = false): void {
     animStatus.textContent = text;
     animStatus.classList.toggle('error', isError);
@@ -402,14 +480,30 @@ async function start(): Promise<void> {
     coeffInput.classList.remove('invalid');
     restart();
   }
+  function setExposureGamma(exposure: number, gamma: number): void {
+    exposureInput.value = String(exposure);
+    gammaInput.value = String(gamma);
+    displayDirty = true;
+  }
+  /** Live view at a point of the path: the same state a render puts into that frame (fitted to the canvas). */
+  function showState(s: PathState): void {
+    if (hasViewKeys()) view = fitRect(s.view, canvas.width, canvas.height);
+    if (hasDisplayKeys()) setExposureGamma(s.exposure, s.gamma);
+    showCoeffs(s.coeffs);
+  }
   function updateKeys(): void {
     keyCountOut.textContent = keys.length > 0 ? `(${keys.length} keyframe${keys.length === 1 ? '' : 's'})` : '';
     keyList.replaceChildren(
       ...keys.map((key, i) => {
         const li = document.createElement('li');
+        const marks = document.createElement('span');
+        marks.className = 'marks';
+        marks.textContent = `${key.view ? '📷' : ''}${key.exposure !== undefined ? '◐' : ''}`;
         const label = document.createElement('span');
-        label.textContent = key.map(formatComplex).join(', ');
-        li.title = 'Show this keyframe';
+        label.className = 'coeffs';
+        label.textContent = key.coeffs.map(formatComplex).join(', ');
+        const parts = ['coefficients', ...(key.view ? ['view'] : []), ...(key.exposure !== undefined ? ['exposure/gamma'] : [])];
+        li.title = `Show this keyframe (${parts.join(' + ')})`;
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.textContent = '×';
@@ -423,9 +517,11 @@ async function start(): Promise<void> {
         li.addEventListener('click', () => {
           stopPlay();
           if (keys.length >= 2) timeline.value = String(keyframeTime(i, keys.length, pathOpts()));
-          showCoeffs(key);
+          if (key.view) view = fitRect(key.view, canvas.width, canvas.height);
+          if (key.exposure !== undefined && key.gamma !== undefined) setExposureGamma(key.exposure, key.gamma);
+          showCoeffs(key.coeffs);
         });
-        li.append(label, remove);
+        li.append(marks, label, remove);
         return li;
       }),
     );
@@ -436,9 +532,14 @@ async function start(): Promise<void> {
   }
 
   addKeyButton.addEventListener('click', () => {
-    keys.push(coeffs.slice());
+    if (!view) return;
+    keys.push({
+      coeffs: coeffs.slice(),
+      ...(attachViewInput.checked && { view: screenRect() }),
+      ...(attachDisplayInput.checked && { exposure: Number(exposureInput.value), gamma: Number(gammaInput.value) }),
+    });
     updateKeys();
-    setAnimStatus(keys.length < 2 ? 'move the coefficients, then add the next keyframe' : '');
+    setAnimStatus(keys.length < 2 ? 'move the coefficients (or the view), then add the next keyframe' : '');
   });
   clearKeysButton.addEventListener('click', () => {
     keys = [];
@@ -449,10 +550,10 @@ async function start(): Promise<void> {
 
   // Scrubbing is an interaction: the live view renders the full-degree golden sample of each position.
   timeline.addEventListener('input', () => {
-    if (keys.length < 2) return;
+    if (keys.length < 2 || !view) return;
     stopPlay();
     interacting = true;
-    showCoeffs(interpolateAt(keys, Number(timeline.value), pathOpts()));
+    showState(stateAt(keys, Number(timeline.value), pathOpts(), fallback()));
   });
   timeline.addEventListener('change', () => (interacting = false));
 
@@ -460,14 +561,14 @@ async function start(): Promise<void> {
   let playStart = 0;
   let playFrame = -1;
   function playTick(now: number): void {
-    if (!playing) return;
+    if (!playing || !view) return;
     const n = frameCount();
     const i = Math.floor(((now - playStart) / 1000) * fps()) % n;
     if (i !== playFrame) {
       playFrame = i;
       const t = frameTime(i, n, loopInput.checked);
       timeline.value = String(t);
-      showCoeffs(interpolateAt(keys, t, pathOpts()));
+      showState(stateAt(keys, t, pathOpts(), fallback()));
     }
     requestAnimationFrame(playTick);
   }
@@ -490,6 +591,25 @@ async function start(): Promise<void> {
     if (!canWriteFolders()) for (const option of [...outputSelect.options]) if (option.value !== 'mp4') option.remove();
   });
 
+  /** The animation as it would render now (also what Save settings stores). */
+  function animationRecord(width: number, height: number, bitrate: number): AnimationRecord {
+    const output = outputSelect.value;
+    const bytes = width * height * 16;
+    return {
+      keyframes: keys,
+      frames: frameCount(),
+      fps: fps(),
+      loop: loopInput.checked,
+      easing: easingSelect.value as Easing,
+      brightness: brightnessSelect.value as Brightness,
+      quality: Number(qualitySelect.value),
+      batchFrames: bytes > 0 ? batchFrames(bytes, device.limits) : 1, // bytes is NaN while the size field is invalid
+      output,
+      codec: output === 'png' ? null : 'avc',
+      bitrate: output === 'png' || !(bitrate > 0) ? null : bitrate,
+    };
+  }
+
   renderAnimButton.addEventListener('click', async () => {
     if (!view || exporting) return;
     if (keys.length < 2) return setAnimStatus('add at least two keyframes first', true);
@@ -500,15 +620,39 @@ async function start(): Promise<void> {
     const kind = outputSelect.value as OutputKind;
     const n = frameCount();
     const rate = fps();
-    const { mp4Error, openAnimationWriter } = await outputModule;
+    const { mp4Bitrate, mp4Error, openAnimationWriter } = await outputModule;
     if (kind !== 'png') {
       const mp4Problem = await mp4Error(width, height, rate);
       if (mp4Problem) return setAnimStatus(mp4Problem, true);
     }
+    // Everything the render needs is fixed now (synchronously, so the picker below keeps this click's activation).
+    const states = statesFor(keys, n, pathOpts(), fallback());
+    const coeffFrames = states.map((s) => s.coeffs);
+    const outView = exportView(view, canvas.width, canvas.height, width, height);
+    const density = outView.pxPerUnit / view.pxPerUnit; // export pixels per screen pixel, per axis
+    // Each frame fits its interpolated rectangle into W x H (contain), as Save PNG fits the screen.
+    const viewFrames = hasViewKeys() ? states.map((s) => fitRect(s.view, width, height)) : undefined;
+    const base: DisplayParams = { ...display(), countScale: density * density }; // same brightness as on screen
+    const animMeta = buildMetadata(
+      metaInput('animation', {
+        pinned: pinnable(coeffFrames),
+        kernel: 'splatFrames', // thread per polynomial with warm start, whatever the live view's kernel is
+        output: { ...(viewFrames?.[0] ?? outView), width, height },
+        display: base,
+        animation: animationRecord(width, height, mp4Bitrate(width, height, rate)),
+      }),
+    );
     let writer: AnimationWriter;
     try {
       // First await after the encoder check: the file/folder picker needs this click's user activation.
-      writer = await openAnimationWriter({ kind, width, height, fps: rate, name: `littlewood-d${degree}-k${coeffs.length}-${width}x${height}-${n}f` });
+      writer = await openAnimationWriter({
+        kind,
+        width,
+        height,
+        fps: rate,
+        name: `littlewood-d${degree}-k${coeffs.length}-${width}x${height}-${n}f`,
+        metadata: { title: describe(animMeta), json: JSON.stringify(animMeta), date: new Date(animMeta.environment.timestamp) },
+      });
     } catch (err) {
       const dismissed = err instanceof DOMException && err.name === 'AbortError';
       return setAnimStatus(dismissed ? 'cancelled' : `could not open the output: ${err instanceof Error ? err.message : String(err)}`, !dismissed);
@@ -523,22 +667,40 @@ async function start(): Promise<void> {
     setAnimStatus(`rendering ${n} frames at ${width}×${height}…`);
     const t0 = performance.now();
     try {
-      const outView = exportView(view, canvas.width, canvas.height, width, height);
-      const density = outView.pxPerUnit / view.pxPerUnit; // export pixels per screen pixel, per axis
       await renderAnimation(
         device,
         {
-          coeffFrames: framesFor(keys, n, pathOpts()),
+          coeffFrames,
+          viewFrames,
           degree,
           view: outView,
           width,
           height,
-          display: { ...display(), countScale: density * density }, // same brightness as on screen
-          brightness: brightnessSelect.value === 'perFrame' ? 'perFrame' : 'locked',
+          display: base,
+          displayFrames: hasDisplayKeys() ? states.map((s) => ({ exposure: s.exposure, gamma: s.gamma })) : undefined,
+          rings: ringsInput.checked ? { scale: density * dpr() } : undefined, // CSS px, like the handles
+          brightness: brightnessSelect.value as Brightness,
           quality: Number(qualitySelect.value) as DraftQuality,
           maxIter: MAX_ITER,
         },
-        (rgba, i) => writer.frame(rgba, i),
+        (rgba, i, frameInfo) =>
+          writer.frame(rgba, i, () =>
+            metadataTexts(
+              buildMetadata({
+                ...animMeta,
+                kind: 'frame',
+                frame: {
+                  index: i,
+                  coeffs: frameInfo.coeffs,
+                  view: { cx: frameInfo.view.cx, cy: frameInfo.view.cy, pxPerUnit: frameInfo.view.pxPerUnit },
+                  exposure: frameInfo.display.exposure,
+                  gamma: frameInfo.display.gamma,
+                  countScale: frameInfo.display.countScale ?? 1,
+                  fixedMax: frameInfo.display.fixedMax ?? 0,
+                },
+              }),
+            ),
+          ),
         (p) => {
           // Compute dominates while a batch runs, encoding while its frames go out: average the two fractions.
           const s = (performance.now() - t0) / 1000;
@@ -568,6 +730,118 @@ async function start(): Promise<void> {
   });
   cancelAnimButton.addEventListener('click', () => animAbort?.abort());
 
+  // ---- settings files: Save settings (.json); Load… / drag-and-drop restores from a PNG, MP4 or JSON ----
+  function setFileStatus(text: string, isError = false): void {
+    fileStatus.textContent = text;
+    fileStatus.classList.toggle('error', isError);
+  }
+
+  saveSettingsButton.addEventListener('click', async () => {
+    if (!view) return;
+    const width = Number(exportWInput.value);
+    const height = Number(exportHInput.value);
+    const { mp4Bitrate } = await outputModule;
+    const sizeOk = exportSizeError(width, height, device.limits) === null;
+    const meta = buildMetadata(
+      metaInput('settings', {
+        pinned: leadingFixable(coeffs),
+        kernel: engine.kernel,
+        display: display(),
+        output: sizeOk ? { ...exportView(view, canvas.width, canvas.height, width, height), width, height } : undefined,
+        animation: keys.length > 0 ? animationRecord(width, height, mp4Bitrate(width, height, fps())) : undefined,
+      }),
+    );
+    const name = `littlewood-d${degree}-k${coeffs.length}-settings.json`;
+    download(new Blob([JSON.stringify(meta, null, 2)], { type: 'application/json' }), name);
+    setFileStatus(`saved ${name}`);
+  });
+
+  /** The metadata inside a PNG (iTXt), an MP4 (comment tag) or a settings JSON; throws a readable error otherwise. */
+  async function readMetadata(file: File): Promise<Metadata> {
+    const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+    if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) {
+      const text = readPngTexts(new Uint8Array(await file.arrayBuffer())).find((t) => t.keyword === PNG_KEYWORD);
+      if (!text) throw new Error('this PNG carries no littlewood-fractals metadata');
+      return parseMetadata(text.text);
+    }
+    if (String.fromCharCode(...head.subarray(4, 8)) === 'ftyp') {
+      const comment = await (await outputModule).readMp4Comment(file);
+      if (!comment) throw new Error('this MP4 carries no littlewood-fractals metadata');
+      return parseMetadata(comment);
+    }
+    if (file.size > 16 * 2 ** 20) throw new Error('not a PNG, MP4 or settings JSON');
+    return parseMetadata(await file.text());
+  }
+
+  function applyLoaded(m: Metadata): void {
+    const st = stateFromMetadata(m);
+    stopPlay();
+    degree = st.degree;
+    degreeInput.value = String(degree);
+    // The recorded screen rectangle, fitted to this canvas: the same region whatever the window size or dpr.
+    view = fitRect(st.view, canvas.width, canvas.height);
+    colorSelect.value = String(st.display.colorMode);
+    setExposureGamma(st.display.exposure, st.display.gamma);
+    ringsInput.checked = st.display.rings;
+    if (st.size) {
+      exportWInput.value = String(st.size.width);
+      exportHInput.value = String(st.size.height);
+    }
+    if (st.animation) {
+      const a = st.animation;
+      keys = a.keyframes;
+      framesInput.value = String(a.frames);
+      fpsInput.value = String(a.fps);
+      loopInput.checked = a.loop;
+      easingSelect.value = a.easing;
+      brightnessSelect.value = a.brightness;
+      qualitySelect.value = String(a.quality);
+      if ([...outputSelect.options].some((o) => o.value === a.output)) outputSelect.value = a.output;
+    } else if (keys.length > 0 && keys[0].coeffs.length !== st.coeffs.length) {
+      keys = []; // keyframes only make sense for one coefficient count; otherwise the user's keyframes stay
+    }
+    updateKeys();
+    showCoeffs(st.coeffs);
+  }
+
+  async function loadFile(file: File): Promise<void> {
+    if (!ready) return setFileStatus('still measuring the GPU kernels: try again in a moment', true);
+    if (exporting) return setFileStatus('wait for the export to finish, then load', true);
+    try {
+      const m = await readMetadata(file);
+      applyLoaded(m);
+      const notes = environmentNotes(m, { build: BUILD_INFO, gpu });
+      setFileStatus(`loaded ${file.name}: ${describe(m)}${notes.map((n) => `\nnote: ${n}`).join('')}`);
+    } catch (err) {
+      setFileStatus(`could not load ${file.name}: ${err instanceof Error ? err.message : String(err)}`, true);
+    }
+  }
+
+  loadButton.addEventListener('click', () => loadFileInput.click());
+  loadFileInput.addEventListener('change', () => {
+    const file = loadFileInput.files?.[0];
+    loadFileInput.value = ''; // loading the same file again must fire 'change' again
+    if (file) void loadFile(file);
+  });
+  // Drop anywhere on the page. Only file drags are taken, so dragging text into the inputs still works.
+  const draggingFiles = (e: DragEvent) => e.dataTransfer?.types.includes('Files') ?? false;
+  window.addEventListener('dragover', (e) => {
+    if (!draggingFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'copy';
+    document.body.classList.add('dropping');
+  });
+  window.addEventListener('dragleave', (e) => {
+    if (e.relatedTarget === null) document.body.classList.remove('dropping'); // left the window
+  });
+  window.addEventListener('drop', (e) => {
+    if (!draggingFiles(e)) return;
+    e.preventDefault();
+    document.body.classList.remove('dropping');
+    const file = e.dataTransfer!.files[0];
+    if (file) void loadFile(file);
+  });
+
   // Pick the faster splat kernel for this GPU before the first frame (~0.1-0.5 s; the canvas stays black meanwhile).
   sizeCanvas();
   statusOut.textContent = 'measuring kernels on this GPU…';
@@ -575,6 +849,7 @@ async function start(): Promise<void> {
   const calibration: Calibration = await engine.calibrate();
   kernelSelect.disabled = false;
   restart(true); // calibrate() left its own polynomials loaded
+  ready = true;
   new ResizeObserver(() => sizeCanvas()).observe(canvas);
   requestAnimationFrame(frame);
 }
