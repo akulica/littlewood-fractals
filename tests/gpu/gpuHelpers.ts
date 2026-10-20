@@ -10,12 +10,18 @@ Object.assign(globalThis, globals); // GPUBufferUsage, GPUMapMode, ... as in a b
 const gpu = create([]);
 
 /** Real GPU device through Dawn. `errors` collects uncaptured validation errors; tests assert it stays empty.
- * `gpu` is the adapter as export metadata records it (core/metadata GpuInfo). */
-export async function nodeDevice(): Promise<{ device: GPUDevice; errors: string[]; adapterName: string; gpu: GpuInfo }> {
+ * `gpu` is the adapter as export metadata records it (core/metadata GpuInfo).
+ * `timestamps` (profiling only, tests/gpu/profile.perf.ts; the app never requests the feature) asks for 'timestamp-query'
+ * when the adapter has it; the result's `timestamps` says whether the device got it. */
+export async function nodeDevice(
+  opts: { timestamps?: boolean } = {},
+): Promise<{ device: GPUDevice; errors: string[]; adapterName: string; gpu: GpuInfo; timestamps: boolean }> {
   const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('dawn.node found no GPU adapter');
   const adapterName = `${adapter.info.vendor} ${adapter.info.architecture} ${adapter.info.description}`.trim();
+  const timestamps = opts.timestamps === true && adapter.features.has('timestamp-query');
   const device = await adapter.requestDevice({
+    requiredFeatures: timestamps ? ['timestamp-query'] : [],
     requiredLimits: {
       maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
       maxBufferSize: adapter.limits.maxBufferSize,
@@ -24,7 +30,7 @@ export async function nodeDevice(): Promise<{ device: GPUDevice; errors: string[
   const errors: string[] = [];
   device.addEventListener('uncapturederror', (e) => errors.push((e as GPUUncapturedErrorEvent).error.message));
   const { vendor, architecture, device: name, description } = adapter.info;
-  return { device, errors, adapterName, gpu: { vendor, architecture, device: name, description } };
+  return { device, errors, adapterName, gpu: { vendor, architecture, device: name, description }, timestamps };
 }
 
 /** Submit compute chunks until the engine reports nothing left, then wait for the GPU.

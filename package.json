@@ -13,8 +13,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc",
-    "bench": "vitest run --config vitest.perf.config.ts --exclude tests/gpu/ab.perf.ts",
-    "ab": "vitest run --config vitest.perf.config.ts tests/gpu/ab.perf.ts"
+    "bench": "vitest run --config vitest.perf.config.ts --exclude tests/gpu/ab.perf.ts --exclude tests/gpu/profile.perf.ts",
+    "ab": "vitest run --config vitest.perf.config.ts tests/gpu/ab.perf.ts",
+    "profile": "vitest run --config vitest.perf.config.ts tests/gpu/profile.perf.ts"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.74",

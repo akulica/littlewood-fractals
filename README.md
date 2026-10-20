@@ -80,6 +80,164 @@ The throughput table above uses the per-polynomial kernel. With auto-selection t
 
 Since the winner depends on the GPU, both kernels ship. At startup `Engine.calibrate()` runs 2¹⁸ degree-20 Littlewood polynomials on each kernel: interleaved, best of 3 after a warm-up, about 0.1–0.5 s in total. It switches to the cooperative kernel only if that wins by more than 10 %, so timing noise can't flip the choice on GPUs where the two are close.
 
+## Where the time goes
+
+Per-stage profile of one still export (`renderImage`) and of a warm 16-frame animation (`renderAnimation`), measured
+2026-10-20 with `npm run profile` (`tests/gpu/profile.perf.ts`; env `PROFILE_QUICK`, `PROFILE_REPS`, `PROFILE_FILTER`,
+`PROFILE_OUT`). Measurement only: nothing shipped changed.
+
+- **How it is timed.** GPU columns come from `timestamp-query` (requested only on the profiling device, never in the
+  app) on the Engine's own passes, through a proxied command encoder. CPU columns are `performance.now()` around each
+  submit + `onSubmittedWorkDone()` / `mapAsync`. A test at the top of the file proves the stage-by-stage path gives
+  bit-identical images to the shipped `renderImage` / `renderAnimation`. Every case also runs the shipped function
+  unmodified (the "e2e" column). Median of 3 repetitions, variants alternated.
+- **Machines.** PC: RX 9060 XT (amd rdna-4, D3D12, Dawn via the `webgpu` npm package, node 24). Laptop: Arc 140T
+  (intel xe-lpg, node 22). The laptop iGPU is power/thermal limited. Its e2e spread is up to 3.5× within one case,
+  so read the PC as the numbers of record and the laptop as ranges.
+- **Scene.** Littlewood {1,−1}, reciprocal enumeration, the app's Reset view, app display defaults. The second set
+  {1, −0.4+0.75i} gives the same shares (raw data: `profile-*.json`, not committed). Animations move the coefficients
+  linearly between the two sets over 16 frames (as `animation.perf.ts`), with locked brightness.
+- **Column meanings.** "Engine setup" is `new Engine` + resize + setParams (for animations also `setFrames`, spread
+  over the 16 frames). "rest" = e2e − all measured stages: CPU/driver latency between waited chunks (can be < 0
+  through noise).
+
+### Stills (ms per export, the faster kernel of each GPU)
+
+| GPU | case | e2e ms (min–max) | Engine setup | solve+splat (GPU) | clear+reduce+tone-map+copy (GPU) | map+unpad (CPU) | rest |
+|---|---|---|---|---|---|---|---|
+| PC | d=16 1920x1080 coop | 123 (123–124) | 120 (98 %) | 1.8 (1 %) | 0.7 (1 %) | 1.2 (1 %) | -1 |
+| PC | d=16 3840x2160 coop | 134 (133–138) | 127 (94 %) | 1.3 (1 %) | 2.5 (2 %) | 5.1 (4 %) | -1 |
+| PC | d=20 1920x1080 coop | 160 (153–161) | 121 (76 %) | 29 (18 %) | 0.5 (0 %) | 1.2 (1 %) | 9 |
+| PC | d=20 3840x2160 coop | 161 (161–169) | 127 (79 %) | 31 (19 %) | 2.4 (2 %) | 4.7 (3 %) | -4 |
+| PC | d=22 1920x1080 coop | 218 (212–241) | 121 (55 %) | 88 (41 %) | 0.4 (0 %) | 1.2 (1 %) | 7 |
+| PC | d=22 3840x2160 coop | 270 (236–300) | 126 (47 %) | 134 (50 %) | 2.4 (1 %) | 4.6 (2 %) | 2 |
+| PC | d=24 1920x1080 coop | 532 (525–593) | 121 (23 %) | 404 (76 %) | 0.5 (0 %) | 1.2 (0 %) | 6 |
+| PC | d=24 3840x2160 coop | 576 (553–585) | 128 (22 %) | 402 (70 %) | 2.5 (0 %) | 4.5 (1 %) | 40 |
+| laptop | d=16 1920x1080 perPoly | 650 (179–658) | 195 (30 %) | 5.5 (1 %) | 3.3 (1 %) | 2.5 (0 %) | 444 |
+| laptop | d=20 1920x1080 perPoly | 263 (230–312) | 179 (68 %) | 66 (25 %) | 2.4 (1 %) | 3.1 (1 %) | 14 |
+| laptop | d=22 1920x1080 perPoly | 514 (446–522) | 189 (37 %) | 240 (47 %) | 2.5 (0 %) | 2.6 (1 %) | 80 |
+| laptop | d=22 3840x2160 perPoly | 452 (451–568) | 230 (51 %) | 261 (58 %) | 8.5 (2 %) | 8.0 (2 %) | -56 |
+| laptop | d=24 1920x1080 perPoly | 1446 (1346–1796) | 167 (12 %) | 1141 (79 %) | 2.2 (0 %) | 2.8 (0 %) | 134 |
+| laptop | d=24 3840x2160 perPoly | 1491 (1412–2066) | 220 (15 %) | 1180 (79 %) | 9.2 (1 %) | 9.0 (1 %) | 73 |
+
+**Engine setup is pipeline compilation.** A scratch split on the PC timed each `createComputePipeline`: `splat` 38–44 ms,
+`splatCoop` 38 ms, `debugRoots` 29–31 ms (never used by exports), `display` render 10 ms, `reduceMax` 4 ms. Total
+≈ 120 ms for every `new Engine`. A second Engine created while the first is alive costs the same, so Dawn does not
+dedupe them. Animations compile `splatFrames` / `splatFramesCoop` lazily on top: +50–54 ms. Buffer allocation is 1.6 ms
+(1024²) to 5.8 ms (4K). Below degree 22, a still export on the PC is mostly compile time. The live view doesn't pay
+this cost (its Engine lives for the whole session), but every Save PNG, `renderAnimation` and test does.
+
+### Warm animations (ms per frame, 16 frames, both kernels)
+
+| GPU | case | e2e ms/frame (min–max) | setup (per frame) | solve+splat (GPU) | load+reduce+tone-map+copy (GPU) | map+unpad (CPU) | rest | PNG sink adds |
+|---|---|---|---|---|---|---|---|---|
+| PC | d=16 1920x1080 perPoly | 20 (18–20) | 11 (59 %) | 2.9 (15 %) | 0.7 (4 %) | 1.1 (6 %) | 3 | +38 |
+| PC | d=16 1920x1080 coop | 15 (15–16) | 11 (76 %) | 1.3 (9 %) | 0.7 (5 %) | 1.1 (8 %) | 0 | +40 |
+| PC | d=16 3840x2160 coop | 24 (23–25) | 12 (51 %) | 1.8 (8 %) | 3.4 (14 %) | 4.5 (19 %) | 2 | +149 |
+| PC | d=20 1920x1080 perPoly | 70 (69–71) | 11 (16 %) | 50 (71 %) | 0.7 (1 %) | 1.2 (2 %) | 7 | +34 |
+| PC | d=20 1920x1080 coop | 46 (44–48) | 11 (24 %) | 26 (55 %) | 0.7 (2 %) | 1.2 (3 %) | 7 | +33 |
+| PC | d=20 3840x2160 coop | 65 (63–65) | 12 (19 %) | 35 (54 %) | 3.4 (5 %) | 4.6 (7 %) | 10 | +127 |
+| PC | d=22 1920x1080 perPoly | 166 (166–168) | 11 (7 %) | 153 (92 %) | 0.7 (0 %) | 1.2 (1 %) | -0 | +40 |
+| PC | d=22 1920x1080 coop | 114 (110–115) | 11 (10 %) | 99 (87 %) | 0.7 (1 %) | 1.2 (1 %) | 2 | +43 |
+| PC | d=22 3840x2160 perPoly | 237 (237–242) | 12 (5 %) | 190 (80 %) | 3.5 (1 %) | 4.7 (2 %) | 27 | +125 |
+| PC | d=22 3840x2160 coop | 173 (171–173) | 12 (7 %) | 135 (78 %) | 3.4 (2 %) | 4.7 (3 %) | 17 | +133 |
+| laptop | d=16 1920x1080 perPoly | 29 (29–34) | 40 (137 %) | 5.0 (17 %) | 4.0 (14 %) | 2.6 (9 %) | -22 | +95 |
+| laptop | d=20 1920x1080 coop | 101 (92–121) | 44 (44 %) | 61 (60 %) | 3.4 (3 %) | 3.0 (3 %) | -10 | +77 |
+| laptop | d=20 3840x2160 perPoly | 149 (131–188) | 31 (21 %) | 73 (49 %) | 14 (10 %) | 9.5 (6 %) | 21 | +332 |
+| laptop | d=22 1920x1080 perPoly | 317 (315–375) | 17 (6 %) | 275 (87 %) | 3.7 (1 %) | 2.9 (1 %) | 19 | +123 |
+| laptop | d=22 1920x1080 coop | 331 (320–332) | 17 (5 %) | 279 (84 %) | 3.8 (1 %) | 2.8 (1 %) | 29 | +112 |
+| laptop | d=22 3840x2160 coop | 413 (413–453) | 46 (11 %) | 342 (83 %) | 14 (3 %) | 9.2 (2 %) | 2 | +369 |
+
+The e2e numbers agree with the earlier numbers of record:
+
+- PC d=22 1080p: warm perPoly 166 vs 175 earlier, warm coop 114 vs 124.
+- PC d=20 1080p warm coop: 46 vs 43–51.
+- Laptop d=22 1080p: 317 / 331 vs 334 / 333.
+
+The per-frame setup is the ~180 ms compile divided over 16 frames. It vanishes on long animations (1440 frames:
+0.1 ms/frame). The earlier puzzle, "warm coop only ties cold coop on the PC at d=20", is most likely this fixed per-export cost: at
+d=20 1080p the compile is 24 % of a 46 ms frame. It is not readback, which costs 1.2 ms (1080p) and 4.7 ms (4K) per
+frame on the PC. The cold-vs-warm comparison itself was not re-run.
+
+**Frame writers (per frame).**
+
+- **PNG, PC:** `encodePng` (Node `CompressionStream`, serial in the sink) adds 33–43 ms at 1080p and 125–150 ms at 4K.
+  At 4K and d ≤ 20 that is more than the render itself.
+- **PNG, laptop:** 77–123 ms (1080p) and 280–475 ms (4K).
+- **MP4, laptop:** WebCodecs H.264 + mediabunny muxing (headless Chrome 155, synthetic sparse frames, 96 frames × 2 runs,
+  wall clock) is 7.4–8.1 ms/frame at 1080p and 27.7–29.1 ms/frame at 4K. MP4 export is therefore never encoder-bound
+  at d ≥ 20. Not measured on the PC (no desktop session over SSH).
+
+### Ceilings (test-only shader variants, GPU time relative to the shipped kernel)
+
+| GPU | mode / kernel | no splat (solve only) | splat only, real roots | splat only, uniform | splat only, near \|z\|=1 |
+|---|---|---|---|---|---|
+| PC | still perPoly | 0.95–1.06 | 0.11–0.29 | 0.10–0.55 | 0.10–0.18 |
+| PC | still coop | 0.86–0.99 | 0.14–0.38 | 0.16–0.78 | 0.15–0.32 |
+| PC | anim perPoly | 0.77–0.97 | 0.38–0.54 | 0.53–0.82 | 0.14–0.27 |
+| PC | anim coop | 0.59–0.80 | 1.02–1.39 | 1.28–2.02 | 0.32–0.74 |
+| laptop | still perPoly | 0.84–0.98 | 0.18–0.30 | 0.23–0.41 | 0.16–0.24 |
+| laptop | still coop | 0.92–0.99 | 0.13–0.32 | 0.17–0.45 | 0.13–0.19 |
+| laptop | anim perPoly | 0.62–0.85 | 0.48–0.84 | 0.53–1.01 | 0.25–0.42 |
+| laptop | anim coop | 0.63–0.91 | 0.54–0.96 | 0.57–0.97 | 0.29–0.40 |
+
+How the ceilings were built:
+
+- **No splat:** roots are summed into a register and written under a runtime-false uniform condition. Its unconverged
+  count equals the full kernel's, so the solve still runs.
+- **Splat only:** reads roots captured once from the same polynomials. Its histogram is bit-identical to the full
+  kernel's. It includes reading the root buffer, which is why the coop animation layout's splat-only exceeds 1×. Read
+  the "no splat" column for that layout.
+
+What the ceilings show:
+
+- **Stills:** if splatting cost nothing, a still would get at most 0–16 % faster. The atomics are not the problem, which
+  confirms the earlier spike.
+- **Warm animations:** splatting into 8 frame slices is 20–41 % of the coop kernel on the PC (3–23 % perPoly). The cost
+  is memory locality, not contention on the same address: the same number of deposits spread uniformly is 1.3–4× slower
+  than deposits concentrated near the unit circle. Eight slices × 16 B/px is 265 MB at 1080p and 1.06 GB at 4K, far
+  beyond any cache.
+
+### Next optimisations, ranked by measured payoff
+
+1. **Compile the pipelines once per device, not per Engine.** A module-level cache keyed by device + entry point,
+   shared by the live view, `renderImage` and `renderAnimation`. Compile `debugRoots` lazily (tests only), and optionally
+   use `createComputePipelineAsync`. Expected gain on the PC, from the setup column:
+   - Still exports: d=16–20 123–160 → ~3–40 ms, d=22 218 → ~100 ms (2.2×), d=24 532 → ~410 ms (1.3×).
+   - Laptop stills: −170–230 ms each.
+   - Animations: −180 ms per export.
+   - Also: faster `npm test` / `npm run ab`.
+
+   It touches no kernel, so images stay bit-identical. Cheapest and safest item on the list.
+2. **Take PNG encoding off the render path.** A small worker pool (`worker_threads` headless, Web Workers in the
+   browser's PNG-folder output) encodes frame i while the GPU renders the next batch; zlib level 1–3 is worth a test
+   too. Expected:
+   - PNG-sequence exports bounded by max(render, encode/workers) instead of render + encode.
+   - PC 4K d=22 coop: 306 → ~175 ms/frame (1.75×). 4K d=20: 192 → ~65 (3×). 1080p d=20: 79 → ~46 (1.7×).
+   - Headless renders with `--png` (e.g. the 4K three-body render) gain the same.
+
+   MP4-only output gains nothing (the encoder is already async and 8–29 ms/frame).
+3. **Shrink the animation histogram footprint (coop warm kernel).** Measured ceiling 1.25–1.7× on coop animations
+   (no-splat 0.59–0.80). Realistic 1.1–1.25×. Candidates, each to be A/B-tested since some change colours:
+   - 8 B/px records (u32 count + packed or lower-precision colour sums).
+   - Fewer frames per batch at 4K (Fb = 4) to fit more of each slice in cache. This trades back some warm-start gain;
+     Fb = 16 was already slower.
+   - Pixel-sorted deposits per workgroup.
+
+   Stills gain little from this (no-splat 0.84–1.06×).
+
+**Rejected, with the measurement:**
+
+- **Faster reduce / tone-map / copy:** ≤ 3.5 ms GPU at 4K, ≤ 5 % of any still or d ≥ 20 frame.
+- **Faster readback / row unpadding:** map ≈ 0.01 ms, unpad 1.2 ms (1080p) / 4.7 ms (4K) on the PC. That is only
+  worth it for d=16 4K animations, where it is 19 %.
+- **Histogram privatisation / atomics packing for stills:** no-splat ≥ 0.84×.
+- **Keeping 2 chunks in flight:** "rest" ≤ 10 ms on the PC. It may help the laptop iGPU (rest up to ~30 ms/frame, wake
+  latency after waits), but that is unmeasured.
+
+The big remaining cost at d ≥ 22 is the Aberth solve itself (70–92 % of every frame). No candidate for it was measured
+tonight.
+
 ## Reciprocal symmetry
 
 - **Idea.** Reversing a coefficient string gives `z^d·p(1/z)`, again a polynomial of the set, with roots `1/z`. So each solve deposits its roots `z` and its partner's roots `1/z`, and only about half the polynomials are solved (`src/core/reciprocal.ts`, on by default; **Enumeration: plain** in the panel, or `Engine.enumeration = 'plain'`, is the original path). The partner gets its own colour (the hue of the reversed digits). Its trimmed leading zeros become roots at 0, and the polynomial's own roots at 0 go to infinity.
