@@ -103,6 +103,13 @@
         </div>
         <output id="animStatus"></output>
       </details>
+      <!-- Options that fail npm run ab: kept for speed experiments and comparison instead of being deleted (README). -->
+      <details id="unverified">
+        <summary>Unverified options (fail A/B tests)</summary>
+        <p class="warn">May draw wrong roots; kept for comparison. Exports record it.</p>
+        <label class="check" title="polish() evaluates p(z) directly for every root, without the reversed evaluation at 1/z for |z| &gt; 1: big roots overflow f32 and are accepted unconverged"><input id="skipOverflowGuard" type="checkbox" /> Skip big-root overflow guard</label>
+        <output id="skipGuardWarning" class="warn" hidden>with reciprocal symmetry this draws false roots near the origin — use plain</output>
+      </details>
       <output id="status"></output>
     </form>
     <div id="error" hidden></div>

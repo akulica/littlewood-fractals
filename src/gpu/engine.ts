@@ -102,6 +102,11 @@ export class Engine {
   /** reciprocal: solve one polynomial of each reversal pair and deposit z and 1/z (about half the solves, the same
    * picture); plain: solve every polynomial (the original path). Read by setParams/setFrames. */
   enumeration: Enumeration = 'reciprocal';
+  /** Unverified option (fails `npm run ab`, kept for comparison): every kernel's polish() evaluates p at z directly,
+   * without the reversed evaluation for |z| > 1. Big roots then overflow f32 and are accepted unconverged:
+   * off-screen with plain enumeration, a false ring near the origin with reciprocal. Read at every dispatch; callers
+   * restart accumulation when they change it. */
+  skipOverflowGuard = false;
   private readonly splatPipe: GPUComputePipeline;
   private readonly coopPipe: GPUComputePipeline;
   private readonly debugPipe: GPUComputePipeline;
@@ -445,7 +450,7 @@ export class Engine {
     const ab = new ArrayBuffer(PARAMS_BYTES);
     new Uint32Array(ab).set([p.degree, p.coeffs.length, count, strideX, this.width, this.height, p.maxIter, entries]);
     new Float32Array(ab).set([p.view.cx, p.view.cy, p.view.pxPerUnit, TOL], 8);
-    new Uint32Array(ab).set([Math.max(this.frameCount, 1)], 12);
+    new Uint32Array(ab).set([Math.max(this.frameCount, 1), this.skipOverflowGuard ? 1 : 0], 12);
     this.device.queue.writeBuffer(this.paramsBuf, 0, ab);
   }
 
@@ -484,6 +489,8 @@ export interface ImageRequest {
   kernel: Kernel;
   /** Default reciprocal. */
   enumeration?: Enumeration;
+  /** Engine.skipOverflowGuard (unverified option); default false. */
+  skipOverflowGuard?: boolean;
   params: FractalParams;
   display: DisplayParams;
   width: number;
@@ -508,6 +515,7 @@ export async function renderImage(
   try {
     engine.kernel = req.kernel;
     engine.enumeration = req.enumeration ?? 'reciprocal';
+    engine.skipOverflowGuard = req.skipOverflowGuard ?? false;
     engine.resize(width, height);
     engine.setParams(req.params);
     let budget = 1 << 16;

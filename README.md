@@ -16,7 +16,7 @@ Plots every root of every polynomial `a_0 + a_1 z + … + a_d z^d` whose coeffic
 ```bash
 npm install
 npm run dev       # http://localhost:5173  (WebGPU needs https:// or localhost)
-npm test          # 203 tests: pure logic + real-GPU tests via Dawn (no browser needed)
+npm test          # 209 tests: pure logic + real-GPU tests via Dawn (no browser needed)
 npm run bench     # throughput + kernel-variant benchmark on this machine's GPU
 npm run ab        # A/B image comparison of the enumeration/kernel variants (see *Checking an optimisation*)
 npm run build     # static site in dist/
@@ -35,6 +35,7 @@ npm run build     # static site in dist/
 | Colour | Hue by low-order coefficients (Egan's palette idea), or inferno density. Exposure and gamma apply instantly, without recomputing. |
 | Kernel | **auto** (default) times both GPU kernels at startup and keeps the faster one. The choice and the measured ratio are shown in the status line. You can also force either kernel. Animations use the warm-starting variant of the same kernel (see *Animation*). |
 | Enumeration | **reciprocal symmetry** (default, about 2× faster) solves one polynomial of each reversed pair and plots its roots `z` and the partner's `1/z`; **plain** solves every polynomial (the original path, for comparison). Same picture up to f32 rounding (see *Reciprocal symmetry*). Applies to the live view, Save PNG and animations; changing it restarts the accumulation. Recorded in every export and restored by Load. |
+| Unverified options | A collapsed section at the bottom of the panel for options that fail `npm run ab` (see *Unverified options*). Off by default; changing one restarts the accumulation, and the status line shows `· unverified` while any is on. |
 | Save PNG | Type the width × height, then **Save PNG**. The image is re-rendered at that size (never upscaled), shows everything currently on screen (extra margin if the aspect differs), and matches the screen's brightness. Up to 64 M pixels (e.g. 8192×8192 or 16384×4096) within the GPU's limits. Live rendering pauses while it exports. The PNG carries the full settings (see *Reproduction metadata*). |
 | Coefficient rings | **Show coefficient rings** (off by default) draws the white handle rings into Save PNG and animation frames, sized like a screenshot of the screen at the export's resolution. In animations they follow each frame's coefficients. |
 | Save settings / Load | **Save settings (.json)** downloads the current state (coefficients, degree, view, display, export size, keyframes and animation settings). **Load…**, or dropping a file anywhere on the page, restores it from such a JSON, from a PNG saved by the app, or from a rendered MP4. |
@@ -175,6 +176,7 @@ Every export records how to make it again, as JSON with schema `littlewood-fract
 - **build:** package version, `git describe --always --dirty` and build time (injected by Vite `define` at build / dev-server start; `unknown` without git);
 - **environment:** GPU adapter (vendor, architecture, device, description), user agent, timestamp;
 - **fractal:** coefficients at full double precision, degree, `maxIter`, tolerance, pinned or not, enumeration order, kernel actually used (`perPoly` / `coop` for images; `splatFrames` / `splatFramesCoop` for animations), enumeration (`reciprocal` or `plain`; optional, files made before it existed load as before);
+- **unverified:** only when an unverified option was on, e.g. `"unverified": { "skipOverflowGuard": true }` (absent = all off); the `Description` line then ends with `UNVERIFIED (…)`;
 - **screen** (centre, `pxPerUnit`, canvas size, dpr) and the **output's own view** (centre, `pxPerUnit` in output pixels, W×H);
 - **display:** colour mode, exposure, gamma, `countScale`, rings;
 - **animation:** the keyframes exactly as stored, frames, fps, loop, easing, brightness, draft quality, batch size, codec and bitrate; each PNG frame adds its index and its interpolated coefficients, view, exposure/gamma, `countScale` and `fixedMax`.
@@ -189,7 +191,7 @@ Reproducibility: the same parameters on the same GPU and driver give a bit-ident
 
 ## Load
 
-**Load…** or a file dropped on the page reads the metadata from a PNG (`iTXt` chunk), an MP4 (comment tag, read with mediabunny's `Input`) or a settings JSON, validates it and restores coefficients, degree, view, colour/exposure/gamma, rings, export size, keyframes and animation settings. The recorded screen rectangle is fitted to the current window, so the same region is shown whatever the window size. Unknown or newer schemas and malformed fields are refused with a message naming the problem (e.g. `fractal.degree must be a whole number in 1..32`). If the file was made by another build or on another GPU, a note says so (results may differ slightly, see above). A file without an animation keeps the current keyframes if they have the same number of coefficients. The enumeration is restored; files made before it was recorded keep the current setting, and a note says so. The kernel choice is not restored: auto picks the fastest one for this GPU.
+**Load…** or a file dropped on the page reads the metadata from a PNG (`iTXt` chunk), an MP4 (comment tag, read with mediabunny's `Input`) or a settings JSON, validates it and restores coefficients, degree, view, colour/exposure/gamma, rings, export size, keyframes and animation settings. The recorded screen rectangle is fitted to the current window, so the same region is shown whatever the window size. Unknown or newer schemas and malformed fields are refused with a message naming the problem (e.g. `fractal.degree must be a whole number in 1..32`). If the file was made by another build or on another GPU, a note says so (results may differ slightly, see above). A file without an animation keeps the current keyframes if they have the same number of coefficients. The enumeration is restored; files made before it was recorded keep the current setting, and a note says so. Unverified options are restored too (a file without the record turns them off), with a note when one is on. The kernel choice is not restored: auto picks the fastest one for this GPU.
 
 ## Checking an optimisation
 
@@ -200,13 +202,24 @@ Reproducibility: the same parameters on the same GPU and driver give a bit-ident
 - **block:** largest lit-pixel difference in any 32×32 block, which catches localized artifacts anywhere;
 - unconverged polynomials.
 
-It prints a table, saves a heatmap per scene in `ab-out/diff/<variant>/` (red = lit only in the variant, cyan = only in the baseline), and fails above limits calibrated on the Arc 140T (in the file header: mean 0.5, centre 4, block 12, unconverged ≤ 0.01 %; measured 0.20, 0, 6, 0). Without the big-root fix it failed with centre 533 and block 417.
+It prints a table, saves a heatmap per scene in `ab-out/diff/<variant>/` (red = lit only in the variant, cyan = only in the baseline), and fails above limits calibrated on the Arc 140T (in the file header: mean 0.5, centre 4, block 12, unconverged ≤ 0.01 %; measured 0.20, 0, 6, 0). Without the big-root fix it failed with centre 533 and block 417. Rows named `unverified-*` (see *Unverified options*) are report-only: the note lists the limits they exceed, and they never fail the run.
 
 **Animations** (`animations` in `scenes.json`): `{1, 0.01}` → `{1, 0.02+0.01i}` at d = 18, a Littlewood zoom 1× → 6× at d = 20, and a moving two-coefficient set zooming 1× → 3× at d = 18, 6 frames each. Every frame is rendered cold by the baseline path (`cold-plain-perPoly`, one `Engine.setParams` per frame) and by `renderAnimation` with each warm kernel (`warm-<enumeration>-<kernel>`: `splatFrames` / `splatFramesCoop`), with per-frame brightness so the tone-mapping matches. The same limits apply to every frame, and a row shows the worst frame. Measured on the Arc 140T: mean ≤ 0.225, centre ≤ 1, block ≤ 4, 0 unconverged. Frames go to `ab-out/<variant>/<scene>-f<i>.png` with frame metadata.
 
 To check a change against the previous build:
 1. Run `npm run ab` on the old build and copy its `ab-out/plain-perPoly` somewhere (e.g. `../ab-old`).
 2. Run it on the new build with `AB_REF_DIR=../ab-old npm run ab` (PowerShell: `$env:AB_REF_DIR='../ab-old'; npm run ab`). This adds a `ref` row per scene that compares this build's baseline with the old images, under the same limits. The metadata of the old images must describe the same scenes.
+
+## Unverified options
+
+The panel's last section, **Unverified options (fail A/B tests)**, holds options and kernels that can draw visibly wrong pictures in some cases. They stay for speed experiments and comparison. The rule: anything that fails `npm run ab` goes here instead of being deleted. Each one is off by default and applies to the live view, Save PNG and animations. Exports record it (`unverified` in the metadata, `UNVERIFIED` in the PNG Description / MP4 title), and Load restores it. `npm run ab` renders these options as report-only `unverified-*` rows, which list the limits they exceed but never fail the run.
+
+- **Skip big-root overflow guard** (`Engine.skipOverflowGuard`; the `direct` flag in the shaders' `Params`, a uniform, so no SIMD divergence). Every kernel's `polish()` (`splat`, `splatCoop`, `splatFrames`, `splatFramesCoop`, `debugRoots`) evaluates `p(z)` directly instead of the reversed polynomial at `1/z` for |z| > 1. That is the evaluation before the fix (see *How it works*): big roots overflow f32 in the stop test (`|p|² → inf ≤ inf`) and are accepted unconverged.
+  - With **plain** enumeration they are off-screen, so the picture is the same.
+  - With **reciprocal** symmetry their `1/z` draws a ring of false dots near the origin. The panel warns when both are on.
+  - `tests/gpu/hugeRoots.test.ts`: `{1, 0.01}` at d = 16 has 14 lit pixels within |z| < 0.25 with the guard. Without it, plain gives 14 and reciprocal 56, on both kernels, still and animation; these are exactly the pre-fix numbers. In `npm run ab` the reciprocal row is expected to fail the centre limit on `ratio-0.01-d20`.
+  - Measured in `npm run ab` (Arc 140T): the reciprocal row fails with centre 533 and block 417 on `ratio-0.01-d20` (267 and 235 on `ratio-100-d16`). Both rows have 1e4–2e5 unconverged polynomials on those two scenes. The other six scenes stay within every limit.
+  - The guard costs nothing measurable: in a same-session A/B on the PC (RX 9060 XT) the guarded and unguarded shaders were within ±2 %. On scenes with big roots, skipping it is even slower (the unconverged polynomials run to `maxIter`: `ratio-0.01-d20` plain 215 → 394 ms in one Arc run). There is no speed reason to turn it off; it is here so the bug can be shown and compared.
 
 ## How it works
 

@@ -4,14 +4,16 @@ import type { Complex } from '../../src/core/complex';
 import { indexToDigits } from '../../src/core/enumeration';
 import type { Kernel } from '../../src/core/schedule';
 import { fitView, type View } from '../../src/core/view';
-import { Engine, renderImage, type Enumeration } from '../../src/gpu/engine';
+import { renderAnimation } from '../../src/gpu/animation';
+import { Engine, renderImage, type DisplayParams, type Enumeration } from '../../src/gpu/engine';
 import { nodeDevice, runToEnd } from './gpuHelpers';
 
 // Big roots (|z| >> 1) of sets with a large coefficient ratio, e.g. {1, 0.01}: 0.01 z^12 + z^11 + ... has a root
 // near -100. Evaluating p(z) there overflowed f32 (|p|^2 in the backward-error stop became inf <= inf), so such roots
 // were "converged" wherever they were. Off-screen in the plain enumeration, but reciprocal symmetry deposits them as
 // 1/z: a ring of wrong dots around the origin (user report). polish() now evaluates the reversed polynomial at 1/z
-// for |z| > 1 (roots.wgsl, coop.wgsl). Every test here failed before that fix.
+// for |z| > 1 (roots.wgsl, coop.wgsl). Every test here failed before that fix (except the skipOverflowGuard ones,
+// which switch the fix off on purpose).
 const { device, errors } = await nodeDevice();
 const engine = new Engine(device, 'rgba8unorm');
 afterAll(() => {
@@ -83,6 +85,35 @@ async function histogram(kernel: Kernel, enumeration: Enumeration, degree: numbe
   return { counts: Uint32Array.from({ length: w * h }, (_, i) => hist[i * 4]), unconverged: (await engine.readStats()).unconverged };
 }
 
+const LIT_W = 400;
+const LIT_H = 250;
+const LIT_VIEW = fitView(LIT_W, LIT_H, 2); // 62.5 px per unit
+const LIT_DISPLAY: DisplayParams = { colorMode: 1, exposure: 1, gamma: 0.6 };
+/** Lit pixels within |z| < 0.25 of a LIT_W x LIT_H RGBA render of LIT_VIEW. */
+function litNearOrigin(rgba: Uint8ClampedArray): number {
+  let n = 0;
+  for (let y = 0; y < LIT_H; y++) {
+    for (let x = 0; x < LIT_W; x++) {
+      const i = (y * LIT_W + x) * 4;
+      if (rgba[i] + rgba[i + 1] + rgba[i + 2] > 0 && Math.hypot(x + 0.5 - LIT_W / 2, y + 0.5 - LIT_H / 2) < 0.25 * LIT_VIEW.pxPerUnit) n++;
+    }
+  }
+  return n;
+}
+/** litNearOrigin of SET at d=16: a still (renderImage: splat / splatCoop) or a one-frame animation (renderAnimation:
+ * splatFrames / splatFramesCoop). */
+async function lit16(kernel: Kernel, enumeration: Enumeration, skipOverflowGuard = false, animation = false): Promise<number> {
+  const params = { coeffs: SET, degree: 16, view: LIT_VIEW, maxIter: 32 };
+  if (!animation) return litNearOrigin(await renderImage(device, { kernel, enumeration, skipOverflowGuard, params, display: LIT_DISPLAY, width: LIT_W, height: LIT_H }));
+  let rgba: Uint8ClampedArray | null = null;
+  await renderAnimation(
+    device,
+    { coeffFrames: [SET], degree: 16, view: LIT_VIEW, width: LIT_W, height: LIT_H, display: LIT_DISPLAY, brightness: 'perFrame', quality: 1, maxIter: 32, enumeration, skipOverflowGuard, kernel },
+    (frame) => void (rgba = frame),
+  );
+  return litNearOrigin(rgba!);
+}
+
 describe.each(['perPoly', 'coop'] as Kernel[])('big roots, %s kernel', (kernel) => {
   it.each(['reciprocal', 'plain'] as Enumeration[])(`{1, 0.01} d=${DEGREE}, %s: the histogram near 0 equals the f64 roots' (|z| < 0.25 at ${PX} px/unit)`, async (enumeration) => {
     const S = 126; // radius 0.25 = 62.5 px around the origin
@@ -112,26 +143,27 @@ describe.each(['perPoly', 'coop'] as Kernel[])('big roots, %s kernel', (kernel) 
     expect(errors).toEqual([]);
   });
 
-  it('{1, 0.01} d=16 at 400x250: as many lit pixels within |z| < 0.25 with reciprocal symmetry as without', async () => {
-    const W = 400;
-    const H = 250;
-    const view = fitView(W, H, 2); // 62.5 px per unit
-    const lit = async (enumeration: Enumeration) => {
-      const rgba = await renderImage(device, { kernel, enumeration, params: { coeffs: SET, degree: 16, view, maxIter: 32 }, display: { colorMode: 1, exposure: 1, gamma: 0.6 }, width: W, height: H });
-      let n = 0;
-      for (let y = 0; y < H; y++) {
-        for (let x = 0; x < W; x++) {
-          const i = (y * W + x) * 4;
-          if (rgba[i] + rgba[i + 1] + rgba[i + 2] > 0 && Math.hypot(x + 0.5 - W / 2, y + 0.5 - H / 2) < 0.25 * view.pxPerUnit) n++;
-        }
-      }
-      return n;
-    };
-    const plain = await lit('plain');
-    const reciprocal = await lit('reciprocal');
+  it(`{1, 0.01} d=16 at ${LIT_W}x${LIT_H}: as many lit pixels within |z| < 0.25 with reciprocal symmetry as without`, async () => {
+    const plain = await lit16(kernel, 'plain');
+    const reciprocal = await lit16(kernel, 'reciprocal');
     // Measured on Arc 140T: 14 and 14 for both kernels; before the fix 14 and 56 (the ring of dots).
     expect(plain).toBeGreaterThan(5);
     expect(Math.abs(reciprocal - plain)).toBeLessThanOrEqual(2);
+    expect(errors).toEqual([]);
+  });
+
+  // Why skipOverflowGuard is an unverified option (README "Unverified options"): without the guard, polish() runs the
+  // old direct evaluation. Plain draws the same picture near 0 (the wrong big roots are off-screen), reciprocal draws
+  // their 1/z there. Also covers the animation kernels, which read the same flag.
+  it.each([false, true])('skipOverflowGuard, {1, 0.01} d=16 (animation kernel: %s): plain unchanged near 0, reciprocal draws false roots there', async (animation) => {
+    const guarded = await lit16(kernel, 'plain', false, animation);
+    const plain = await lit16(kernel, 'plain', true, animation);
+    const reciprocal = await lit16(kernel, 'reciprocal', true, animation);
+    // Measured on Arc 140T, both kernels, still and animation: 14, 14, 56 (the pre-fix numbers of the test above: the
+    // flag restores the old evaluation exactly). 4x the true count; reciprocal with the guard stays within 2 of plain.
+    expect(guarded).toBeGreaterThan(5);
+    expect(Math.abs(plain - guarded)).toBeLessThanOrEqual(2);
+    expect(reciprocal - guarded).toBeGreaterThan(30);
     expect(errors).toEqual([]);
   });
 });

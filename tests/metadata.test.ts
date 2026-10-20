@@ -73,6 +73,11 @@ describe('describe', () => {
     expect(describeMeta(image)).toBe('Littlewood fractal · degree 20 · coefficients 1, 0.3-0.333i · centre 0.25-0.5i · zoom 1×');
     expect(describeMeta(buildMetadata(input))).toMatch(/^Littlewood fractal · frame 17 of 240 · degree 20 · coefficients 1, -0.7\+0.1i · centre 0.1\+0.05i · zoom 2.77778×$/);
   });
+  it('ends with UNVERIFIED and the option when an unverified option was on (PNG Description, MP4 title)', () => {
+    const m = buildMetadata({ ...input, unverified: { skipOverflowGuard: true } });
+    expect(describeMeta(m)).toMatch(/ · zoom 2\.77778× · UNVERIFIED \(skip big-root overflow guard\)$/);
+    expect(metadataTexts(m).find((t) => t.keyword === 'Description')!.text).toContain('UNVERIFIED');
+  });
 });
 
 describe('parseMetadata', () => {
@@ -90,6 +95,7 @@ describe('parseMetadata', () => {
       degree: 20,
       view: { cx: 0.25, cy: -1 / 7, halfW: 2400 / 2 / 412.5, halfH: 1500 / 2 / 412.5 },
       display: { colorMode: 1, exposure: 1.25, gamma: 0.6, rings: true },
+      unverified: { skipOverflowGuard: false },
       size: { width: 3840, height: 2160 },
       animation: { keyframes: input.animation!.keyframes, frames: 240, fps: 30, loop: true, easing: 'smooth', brightness: 'locked', quality: 0.5, output: 'mp4+png' },
     });
@@ -113,6 +119,19 @@ describe('parseMetadata', () => {
       expect(stateFromMetadata(m).enumeration).toBe(enumeration);
     }
     expect('enumeration' in stateFromMetadata(parseMetadata(JSON.stringify(buildMetadata(input))))).toBe(false);
+  });
+  it('unverified options: recorded only when on, round trip, Load restores them (absent = all off)', () => {
+    const on = buildMetadata({ ...input, unverified: { skipOverflowGuard: true } });
+    expect(on.unverified).toEqual({ skipOverflowGuard: true });
+    const back = parseMetadata(JSON.stringify(on));
+    expect(back).toEqual(on);
+    expect(stateFromMetadata(back).unverified).toEqual({ skipOverflowGuard: true });
+    const off = buildMetadata({ ...input, unverified: { skipOverflowGuard: false } });
+    expect('unverified' in off).toBe(false); // all off: no record, the same JSON as before the option existed
+    expect(stateFromMetadata(parseMetadata(JSON.stringify(off))).unverified).toEqual({ skipOverflowGuard: false });
+    const bad = JSON.parse(JSON.stringify(on));
+    bad.unverified.skipOverflowGuard = 'yes';
+    expect(() => parseMetadata(JSON.stringify(bad))).toThrow(/unverified\.skipOverflowGuard must be true or false/);
   });
   it('explains what is wrong: not JSON, no schema, newer or unknown schema', () => {
     expect(() => parseMetadata('{oops')).toThrow(/not valid JSON/);

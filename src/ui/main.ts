@@ -25,10 +25,12 @@ import {
   metadataTexts,
   parseMetadata,
   stateFromMetadata,
+  unverifiedLabels,
   type AnimationRecord,
   type GpuInfo,
   type Metadata,
   type MetadataInput,
+  type UnverifiedOptions,
 } from '../core/metadata';
 import { encodePng, readPngTexts } from '../core/png';
 import { effectiveEnumeration, type Enumeration } from '../core/reciprocal';
@@ -82,6 +84,9 @@ const outputSelect = el<HTMLSelectElement>('output');
 const renderAnimButton = el<HTMLButtonElement>('renderAnim');
 const cancelAnimButton = el<HTMLButtonElement>('cancelAnim');
 const animStatus = el<HTMLOutputElement>('animStatus');
+const unverifiedSection = el<HTMLDetailsElement>('unverified');
+const skipGuardInput = el<HTMLInputElement>('skipOverflowGuard');
+const skipGuardWarning = el<HTMLOutputElement>('skipGuardWarning');
 const SVG_NS = 'http://www.w3.org/2000/svg';
 // The MP4 muxer is most of the bundle: a separate chunk, fetched in the background right away so the first
 // picture is not delayed and the module is ready long before anyone clicks Render.
@@ -327,6 +332,18 @@ async function start(): Promise<void> {
   engine.enumeration = enumerationSelect.value as Enumeration;
   enumerationSelect.addEventListener('change', () => {
     engine.enumeration = enumerationSelect.value as Enumeration;
+    showUnverified();
+    restart(true);
+  });
+  // Unverified options (fail npm run ab): the live view, Save PNG and animations read the engine's flags.
+  const unverified = (): UnverifiedOptions => ({ skipOverflowGuard: engine.skipOverflowGuard });
+  function showUnverified(): void {
+    skipGuardWarning.hidden = !(engine.skipOverflowGuard && engine.enumeration === 'reciprocal');
+  }
+  skipGuardInput.checked = engine.skipOverflowGuard;
+  skipGuardInput.addEventListener('change', () => {
+    engine.skipOverflowGuard = skipGuardInput.checked;
+    showUnverified();
     restart(true);
   });
 
@@ -336,9 +353,10 @@ async function start(): Promise<void> {
     const secondsLeft = (Number(total - done) * engine.degree) / Math.max(rootsPerSec, 1);
     const sampled = done < total ? ` · preview · ${fmtPct((Number(done) / Number(total)) * 100)} % sampled` : '';
     const kernelNote = kernelSelect.value === 'auto' ? ` (auto: coop/perPoly = ${(calibration.coopMs / calibration.perPolyMs).toFixed(2)})` : '';
+    const unverifiedNote = unverifiedLabels(unverified()).length > 0 ? ' · unverified' : '';
     statusOut.textContent =
       `degree ${engine.degree}${sampled} · ${coeffs.length} coefficients\n` +
-      `kernel ${engine.kernel}${kernelNote} · ${engine.activeEnumeration ?? engine.enumeration}\n` +
+      `kernel ${engine.kernel}${kernelNote} · ${engine.activeEnumeration ?? engine.enumeration}${unverifiedNote}\n` +
       `${pct.toFixed(2)} % of ${total.toLocaleString()} polynomials\n` +
       `${(rootsPerSec / 1e6).toFixed(1)} M roots/s` +
       (done < total ? ` · ~${fmtTime(secondsLeft)} left` : ' · done');
@@ -414,6 +432,7 @@ async function start(): Promise<void> {
       build: BUILD_INFO,
       environment: { gpu, userAgent: navigator.userAgent, timestamp: new Date().toISOString() },
       fractal: { coeffs, degree, maxIter: MAX_ITER, tol: TOL, pinned: o.pinned, ordering: engine.ordering, kernel: o.kernel, enumeration: o.enumeration },
+      unverified: unverified(), // buildMetadata records it only when an option is on
       screen: { cx: view!.cx, cy: view!.cy, pxPerUnit: view!.pxPerUnit, width: canvas.width, height: canvas.height, dpr: dpr() },
       output: o.output,
       display: {
@@ -464,7 +483,7 @@ async function start(): Promise<void> {
       );
       const rgba = await renderImage(
         device,
-        { kernel: engine.kernel, enumeration: engine.enumeration, params: { coeffs, degree, view: outView, maxIter: MAX_ITER }, display: imageDisplay, width, height },
+        { kernel: engine.kernel, enumeration: engine.enumeration, skipOverflowGuard: engine.skipOverflowGuard, params: { coeffs, degree, view: outView, maxIter: MAX_ITER }, display: imageDisplay, width, height },
         (done, total) => setExportStatus(`exporting ${width}×${height}: ${(Number((done * 1000n) / total) / 10).toFixed(1)} %`),
       );
       setExportStatus(`encoding PNG…`);
@@ -706,6 +725,7 @@ async function start(): Promise<void> {
           quality: Number(qualitySelect.value) as DraftQuality,
           maxIter: MAX_ITER,
           enumeration: engine.enumeration,
+          skipOverflowGuard: engine.skipOverflowGuard,
           kernel: engine.kernel,
         },
         (rgba, i, frameInfo) =>
@@ -805,6 +825,11 @@ async function start(): Promise<void> {
     // Files made before the Enumeration option carry none: the current setting stays (loadFile notes it).
     const enumerationChanged = st.enumeration !== undefined && st.enumeration !== engine.enumeration;
     if (st.enumeration) enumerationSelect.value = engine.enumeration = st.enumeration;
+    // A file without the record had every unverified option off: Load turns them off too.
+    const unverifiedChanged = st.unverified.skipOverflowGuard !== engine.skipOverflowGuard;
+    skipGuardInput.checked = engine.skipOverflowGuard = st.unverified.skipOverflowGuard;
+    if (engine.skipOverflowGuard) unverifiedSection.open = true; // show what is on
+    showUnverified();
     degree = st.degree;
     degreeInput.value = String(degree);
     // The recorded screen rectangle, fitted to this canvas: the same region whatever the window size or dpr.
@@ -831,7 +856,7 @@ async function start(): Promise<void> {
     }
     updateKeys();
     showCoeffs(st.coeffs);
-    if (enumerationChanged) restart(true); // showCoeffs restarts only when coefficients, degree or view changed
+    if (enumerationChanged || unverifiedChanged) restart(true); // showCoeffs restarts only when coefficients, degree or view changed
   }
 
   async function loadFile(file: File): Promise<void> {
@@ -842,6 +867,7 @@ async function start(): Promise<void> {
       applyLoaded(m);
       const notes = environmentNotes(m, { build: BUILD_INFO, gpu });
       if (!m.fractal.enumeration) notes.push(`no enumeration recorded (made before the option existed): kept the current setting, ${engine.enumeration}`);
+      for (const option of unverifiedLabels(m.unverified)) notes.push(`made with the unverified option "${option}" (may draw wrong roots): turned it on`);
       setFileStatus(`loaded ${file.name}: ${describe(m)}${notes.map((n) => `\nnote: ${n}`).join('')}`);
     } catch (err) {
       setFileStatus(`could not load ${file.name}: ${err instanceof Error ? err.message : String(err)}`, true);

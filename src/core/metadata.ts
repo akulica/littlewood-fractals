@@ -55,6 +55,16 @@ export interface FractalRecord {
   enumeration?: Enumeration;
 }
 
+/** Options that fail the A/B tests (`npm run ab`) and can draw wrong roots, kept for speed experiments and
+ * comparison. Recorded only when one is on: an absent record means all off. */
+export interface UnverifiedOptions {
+  /** polish() evaluates p at z directly, without the reversed evaluation for |z| > 1 (Engine.skipOverflowGuard). */
+  skipOverflowGuard: boolean;
+}
+
+/** The unverified options that are on, as short labels (empty: none). */
+export const unverifiedLabels = (u: UnverifiedOptions | undefined): string[] => (u?.skipOverflowGuard ? ['skip big-root overflow guard'] : []);
+
 /** A view on a width x height pixel grid (pxPerUnit in that grid's pixels). */
 export interface ViewRecord {
   cx: number;
@@ -115,6 +125,8 @@ export interface Metadata {
   build: BuildInfo;
   environment: Environment;
   fractal: FractalRecord;
+  /** Absent: every unverified option was off. */
+  unverified?: UnverifiedOptions;
   /** The live view when the output was made. */
   screen: ScreenRecord;
   /** The output's own view, pxPerUnit in output pixels (animation and frame: frame 0's; `frame` holds this frame's).
@@ -142,6 +154,7 @@ export function buildMetadata(m: MetadataInput): Metadata {
     build: { ...m.build },
     environment: { gpu: { ...m.environment.gpu }, userAgent: m.environment.userAgent, timestamp: m.environment.timestamp },
     fractal: { ...m.fractal, coeffs: m.fractal.coeffs.map((c) => ({ re: c.re, im: c.im })) },
+    ...(unverifiedLabels(m.unverified).length > 0 && { unverified: { ...m.unverified! } }),
     screen: { ...m.screen },
     ...(m.output && { output: { ...m.output } }),
     display: { ...m.display },
@@ -153,7 +166,7 @@ export function buildMetadata(m: MetadataInput): Metadata {
 const short = (x: number) => Number(x.toPrecision(6)).toString();
 
 /** One human-readable line (PNG Description, MP4 title): degree, coefficients, centre and zoom. Zoom 1x is the
- * app's Reset view (radius 2 across the shorter side). */
+ * app's Reset view (radius 2 across the shorter side). Ends with UNVERIFIED (and the options) when one was on. */
 export function describe(m: Metadata): string {
   const v = m.frame ? { ...m.frame.view, width: m.output?.width ?? 1, height: m.output?.height ?? 1 } : (m.output ?? m.screen);
   const zoom = (v.pxPerUnit * 4) / Math.min(v.width, v.height);
@@ -161,7 +174,9 @@ export function describe(m: Metadata): string {
   // 8 significant digits: deep zooms need more than formatComplex's 3 decimals to locate the centre.
   const centre = `${Number(v.cx.toPrecision(8))}${v.cy < 0 ? '-' : '+'}${Number(Math.abs(v.cy).toPrecision(8))}i`;
   const what = m.frame ? `frame ${m.frame.index} of ${m.animation?.frames ?? '?'} · ` : m.animation ? `animation, ${m.animation.frames} frames · ` : '';
-  return `Littlewood fractal · ${what}degree ${m.fractal.degree} · coefficients ${coeffs} · centre ${centre} · zoom ${short(zoom)}×`;
+  const unverified = unverifiedLabels(m.unverified);
+  const warning = unverified.length > 0 ? ` · UNVERIFIED (${unverified.join(', ')})` : '';
+  return `Littlewood fractal · ${what}degree ${m.fractal.degree} · coefficients ${coeffs} · centre ${centre} · zoom ${short(zoom)}×${warning}`;
 }
 
 /** PNG chunks for `m`: the JSON as iTXt (UTF-8), plus the standard tEXt Software and Description. */
@@ -287,6 +302,10 @@ export function parseMetadata(json: string): Metadata {
     },
   };
   if (fractal.enumeration !== undefined) m.fractal.enumeration = oneOf(fractal, 'enumeration', 'fractal', ENUMERATIONS);
+  if (raw.unverified !== undefined) {
+    const u = obj(raw.unverified, 'unverified');
+    m.unverified = { skipOverflowGuard: bool(u, 'skipOverflowGuard', 'unverified') };
+  }
   if (display.fixedMax !== undefined) m.display.fixedMax = num(display, 'fixedMax', 'display', (v) => v >= 0, 'a number ≥ 0');
   if (raw.output !== undefined) m.output = viewRecord(raw.output, 'output');
   if (raw.animation !== undefined) {
@@ -343,6 +362,8 @@ export interface LoadedState {
   display: { colorMode: 0 | 1; exposure: number; gamma: number; rings: boolean };
   /** Absent in files made before the option existed: the app keeps its current setting. */
   enumeration?: Enumeration;
+  /** Always set: a file without the record had every unverified option off. */
+  unverified: UnverifiedOptions;
   /** Export / animation size (Save PNG W x H). */
   size?: { width: number; height: number };
   animation?: { keyframes: Keyframe[]; frames: number; fps: number; loop: boolean; easing: Easing; brightness: Brightness; quality: number; output: string };
@@ -356,6 +377,7 @@ export function stateFromMetadata(m: Metadata): LoadedState {
     degree: m.fractal.degree,
     view: { cx: s.cx, cy: s.cy, halfW: s.width / 2 / s.pxPerUnit, halfH: s.height / 2 / s.pxPerUnit },
     display: { colorMode: m.display.colorMode, exposure: m.display.exposure, gamma: m.display.gamma, rings: m.display.rings },
+    unverified: { skipOverflowGuard: m.unverified?.skipOverflowGuard ?? false },
   };
   if (m.fractal.enumeration) state.enumeration = m.fractal.enumeration;
   if (m.output) state.size = { width: m.output.width, height: m.output.height };

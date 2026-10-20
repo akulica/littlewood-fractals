@@ -17,8 +17,8 @@ struct Params {
   pxPerUnit: f32,   // pixels per unit of the complex plane
   tol: f32,         // backward-error stop: |p(z)| <= tol * sum|a_i||z|^i  (engine uses 1e-5)
   frames: u32,      // splatFrames only: coefficient sets in `coeffs` and histogram slices in `hist`
-  _pad0: u32,       // 64 bytes, same layout as coop.wgsl
-  _pad1: u32,
+  direct: u32,      // 1: skip the big-root overflow guard (Engine.skipOverflowGuard, an unverified option)
+  _pad1: u32,       // 64 bytes, same layout as coop.wgsl
   _pad2: u32,
 };
 
@@ -170,7 +170,8 @@ fn polish(lo: u32, hi: u32) -> bool {
       // Evaluating p directly overflowed f32 for big roots (|p|^2 in the stop test became inf <= inf) and
       // accepted them wherever they were; invisible off-screen until reciprocal symmetry drew them as 1/z.
       // One Horner loop either way (no SIMD divergence): x = z with a_hi..a_lo, or x = 1/z with a_lo..a_hi.
-      let flip = az > 1.0;
+      // P.direct = 1 (unverified option, uniform): always z, the old overflowing evaluation, kept for comparison.
+      let flip = az > 1.0 && P.direct == 0u;
       let x = select(zj, crecip(zj), flip);
       let ax = select(az, 1.0 / az, flip);
       var p = a[select(hi, lo, flip)];

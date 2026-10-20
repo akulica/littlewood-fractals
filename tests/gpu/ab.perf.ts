@@ -44,6 +44,17 @@ import { nodeDevice, runToEnd } from './gpuHelpers';
 // measure and ms per frame (warm rows include tone-mapping and readback). Unconverged counts polynomial-frames.
 // PNGs: ab-out/<variant>/<scene>-f<i>.png with frame metadata; heatmaps ab-out/diff/<variant>/<scene>-f<i>.png.
 //
+// Unverified options (README "Unverified options": anything that fails this harness goes there instead of being
+// deleted) get REPORT-ONLY rows: rendered, compared and printed like the others with "unverified" in the variant and
+// note, the limits they exceed listed in the note, but never failing the run. Stills only, perPoly:
+//   unverified-noguard-plain-perPoly       skipOverflowGuard, plain: the wrong big roots are off-screen, so the
+//                                          picture matches; only unconverged may exceed its limit
+//   unverified-noguard-reciprocal-perPoly  skipOverflowGuard, reciprocal: EXPECTED to fail the centre limit on
+//                                          ratio-0.01-d20 (and ratio-100-d16): the ring of 1/z dots near the origin
+// Measured on Arc 140T: noguard-reciprocal ratio-0.01-d20 centre 533, block 417, ratio-100-d16 centre 267, block 235
+// (the pre-fix numbers below); both noguard rows 1e4-2e5 unconverged on the two ratio scenes; the other 6 scenes
+// within every limit.
+//
 // Thresholds, calibrated on Intel Arc 140T (Dawn/D3D12) with the big-root fix: the worst of the 8 scenes x 3 variants,
 // then 2x headroom or more. The yardstick is the f32 noise between the two plain kernels on the same polynomials.
 //   measured     px % up to 38.7 (littlewood-zoom4: tone-mapping follows the densest pixel, small shifts everywhere),
@@ -63,9 +74,24 @@ const LIMITS = { mean: 0.5, centre: 4, block: 12, unconverged: 1e-4 };
 const BLOCK = 32;
 const OUT = 'ab-out';
 const BASELINE = 'plain-perPoly';
-const VARIANTS: { name: string; enumeration: Enumeration; kernel: Kernel }[] = (['plain', 'reciprocal'] as const).flatMap((enumeration) =>
+interface Variant {
+  name: string;
+  enumeration: Enumeration;
+  kernel: Kernel;
+  /** Unverified option (Engine.skipOverflowGuard): the row is report-only. */
+  skipOverflowGuard?: boolean;
+}
+const VERIFIED: Variant[] = (['plain', 'reciprocal'] as const).flatMap((enumeration) =>
   (['perPoly', 'coop'] as const).map((kernel) => ({ name: `${enumeration}-${kernel}`, enumeration, kernel })),
 );
+const UNVERIFIED: Variant[] = (['plain', 'reciprocal'] as const).map((enumeration) => ({
+  name: `unverified-noguard-${enumeration}-perPoly`,
+  enumeration,
+  kernel: 'perPoly',
+  skipOverflowGuard: true,
+}));
+const VARIANTS = [...VERIFIED, ...UNVERIFIED];
+const reportOnly = (v: Variant) => v.skipOverflowGuard === true;
 
 interface Scene {
   name: string;
@@ -87,7 +113,7 @@ const animations: AnimationScene[] = sceneFile.animations;
 const viewOf = (s: Pick<Scene, 'view'>): View => ({ cx: s.view.cx, cy: s.view.cy, pxPerUnit: (s.view.zoom * Math.min(W, H)) / 4 });
 const ANIM_PATH: PathOptions = { easing: 'linear', loop: false };
 const ANIM_BASELINE = `cold-${BASELINE}`;
-const ANIM_VARIANTS = VARIANTS.map((v) => ({ ...v, name: `warm-${v.name}` }));
+const ANIM_VARIANTS = VERIFIED.map((v) => ({ ...v, name: `warm-${v.name}` }));
 
 function buildInfo(): BuildInfo {
   const version = JSON.parse(new TextDecoder().decode(readFileSync(new URL('../../package.json', import.meta.url)))).version ?? 'unknown';
@@ -111,13 +137,14 @@ interface Render {
   polys: number;
 }
 
-async function render(scene: Scene, v: (typeof VARIANTS)[number]): Promise<Render> {
+async function render(scene: Scene, v: Variant): Promise<Render> {
   const engine = new Engine(device, 'rgba8unorm');
   const out = new RgbaReadback(device, W, H);
   try {
     const view = viewOf(scene);
     engine.kernel = v.kernel;
     engine.enumeration = v.enumeration;
+    engine.skipOverflowGuard = v.skipOverflowGuard ?? false;
     engine.resize(W, H);
     engine.setParams({ coeffs: scene.coeffs, degree: scene.degree, view, maxIter: MAX_ITER });
     const t0 = performance.now();
@@ -128,7 +155,7 @@ async function render(scene: Scene, v: (typeof VARIANTS)[number]): Promise<Rende
     engine.encodeDisplay(enc, out.view, DISPLAY);
     const rgba = await out.read(enc);
     const pinned = leadingFixable(scene.coeffs);
-    const meta = metadataOf({ coeffs: scene.coeffs, degree: scene.degree, pinned, kernel: v.kernel, enumeration: engine.activeEnumeration ?? v.enumeration, view });
+    const meta = metadataOf({ coeffs: scene.coeffs, degree: scene.degree, pinned, kernel: v.kernel, enumeration: engine.activeEnumeration ?? v.enumeration, view, skipOverflowGuard: v.skipOverflowGuard });
     await writePng(`${OUT}/${v.name}/${scene.name}.png`, rgba, metadataTexts(meta));
     return { rgba, ms, unconverged, polys: Number(engine.progress.total) };
   } finally {
@@ -145,6 +172,7 @@ function metadataOf(o: {
   kernel: string;
   enumeration: Enumeration;
   view: View;
+  skipOverflowGuard?: boolean;
   animation?: AnimationRecord;
   frame?: FrameRecord;
 }): Metadata {
@@ -153,6 +181,7 @@ function metadataOf(o: {
     build,
     environment: { gpu, userAgent: `node ${nodeVersion}, Dawn (webgpu npm), tests/gpu/ab.perf.ts`, timestamp: new Date().toISOString() },
     fractal: { coeffs: o.coeffs, degree: o.degree, maxIter: MAX_ITER, tol: TOL, pinned: o.pinned, ordering: 'golden', kernel: o.kernel, enumeration: o.enumeration },
+    unverified: { skipOverflowGuard: o.skipOverflowGuard ?? false },
     screen: { ...o.view, width: W, height: H, dpr: 1 },
     output: { ...o.view, width: W, height: H },
     display: { colorMode: DISPLAY.colorMode, exposure: DISPLAY.exposure, gamma: DISPLAY.gamma, countScale: 1, rings: false },
@@ -256,7 +285,7 @@ interface Row {
 }
 const rows: Row[] = [];
 
-const WIDTHS = [26, 24, 7, 7, 7, 7, 7, 6];
+const WIDTHS = [26, 37, 7, 7, 7, 7, 7, 6];
 const fmtCells = (cells: string[]) => cells.map((c, i) => (i < 2 ? c.padEnd(WIDTHS[i]) : i < WIDTHS.length ? c.padStart(WIDTHS[i]) : c)).join(' ');
 const fmtRow = (r: Row) => {
   const d = r.diff;
@@ -267,7 +296,8 @@ afterAll(() => {
   console.log(
     [
       `A/B ${W}x${H} on ${adapterName}, build ${build.version} (${build.commit}); baseline ${BASELINE}`,
-      `limits: mean <= ${LIMITS.mean}, centre <= ${LIMITS.centre}, block <= ${LIMITS.block}, unconverged <= ${LIMITS.unconverged * 100} % of the polynomials`,
+      `limits: mean <= ${LIMITS.mean}, centre <= ${LIMITS.centre}, block <= ${LIMITS.block}, unconverged <= ${LIMITS.unconverged * 100} % of the polynomials` +
+        ` (unverified-* rows: report only, never fail)`,
       fmtCells(['scene', 'variant', 'ms', 'unconv', 'px %', 'mean', 'centre', 'block']),
       ...rows.map(fmtRow),
     ].join('\n'),
@@ -294,6 +324,16 @@ it.each(scenes.map((s) => [s.name, s] as const))('%s', async (_, scene) => {
     const r = results.get(v.name)!;
     const row: Row = { scene: scene.name, variant: v.name, ms: r.ms.toFixed(0), unconverged: String(r.unconverged) };
     rows.push(row);
+    if (reportOnly(v)) {
+      row.diff = compare(r.rgba, base.rgba, view);
+      await writePng(`${OUT}/diff/${v.name}/${scene.name}.png`, row.diff.heat);
+      const over = [
+        ...(r.unconverged > LIMITS.unconverged * r.polys ? ['unconverged'] : []),
+        ...(['mean', 'centre', 'block'] as const).filter((k) => row.diff![k] > LIMITS[k]),
+      ];
+      row.note = `unverified, report only${over.length > 0 ? `: over ${over.join(', ')}` : ''}`;
+      continue;
+    }
     expect.soft(r.unconverged, `${scene.name} ${v.name}: unconverged polynomials`).toBeLessThanOrEqual(LIMITS.unconverged * r.polys);
     if (v.name === BASELINE) continue;
     row.diff = compare(r.rgba, base.rgba, view);

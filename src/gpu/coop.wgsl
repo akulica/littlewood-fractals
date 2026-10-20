@@ -17,8 +17,8 @@ struct Params {
   pxPerUnit: f32,   // pixels per unit of the complex plane
   tol: f32,
   frames: u32,      // splatFramesCoop: coefficient sets in `coeffs` and histogram slices in `hist`
-  _pad0: u32,       // 64 bytes, same layout as roots.wgsl
-  _pad1: u32,
+  direct: u32,      // 1: skip the big-root overflow guard (Engine.skipOverflowGuard, an unverified option)
+  _pad1: u32,       // 64 bytes, same layout as roots.wgsl
   _pad2: u32,
 };
 
@@ -155,8 +155,8 @@ fn polish(li: u32, j: u32, abase: u32, zbase: u32, lo: u32, hi: u32, live: bool,
     var nz = zj;
     if (!*done) {
       let az = length(zj);
-      // |z| > 1: evaluate the reversed polynomial at w = 1/z (no f32 overflow; see roots.wgsl polish).
-      let flip = az > 1.0;
+      // |z| > 1: evaluate the reversed polynomial at w = 1/z (no f32 overflow; see roots.wgsl polish), unless P.direct.
+      let flip = az > 1.0 && P.direct == 0u;
       let x = select(zj, crecip(zj), flip);
       let ax = select(az, 1.0 / az, flip);
       var p = sa[abase + select(hi, lo, flip)];

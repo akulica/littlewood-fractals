@@ -31,6 +31,8 @@ export interface AnimationRequest {
   maxIter: number;
   /** Default reciprocal (Engine.enumeration). */
   enumeration?: Enumeration;
+  /** Engine.skipOverflowGuard (unverified option); default false. */
+  skipOverflowGuard?: boolean;
   /** Splat kernel the GPU runs faster (Engine.kernel after calibrate(), or the user's choice); default perPoly. Its
    * warm-starting batch variant renders the frames: perPoly -> splatFrames, coop -> splatFramesCoop. */
   kernel?: Kernel;
@@ -94,6 +96,7 @@ export async function renderAnimation(
   const progress: AnimationProgress = { frame: 0, frames: frames.length, polysDone: 0, polysTotal: Number(perFrame) * frames.length };
   const engine = new Engine(device, 'rgba8unorm');
   engine.enumeration = req.enumeration ?? 'reciprocal';
+  engine.skipOverflowGuard = req.skipOverflowGuard ?? false;
   engine.kernel = req.kernel ?? 'perPoly';
   const out = new RgbaReadback(device, width, height);
   let slices: GPUBuffer | null = null;
