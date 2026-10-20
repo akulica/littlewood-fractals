@@ -133,3 +133,14 @@ describe('Engine', () => {
     expect(errors).toEqual([]);
   });
 });
+
+describe('pipeline cache per device', () => {
+  it('a second Engine on the same device reuses the compiled pipelines', () => {
+    const a = new Engine(device, 'rgba8unorm') as unknown as Record<string, unknown>;
+    const b = new Engine(device, 'rgba8unorm') as unknown as Record<string, unknown>;
+    for (const k of ['splatPipe', 'coopPipe', 'reducePipe', 'renderPipe', 'debugPipe']) expect(b[k]).toBe(a[k]);
+    const c = new Engine(device, 'bgra8unorm') as unknown as Record<string, unknown>;
+    expect(c.renderPipe).not.toBe(a.renderPipe);
+    expect(c.splatPipe).toBe(a.splatPipe);
+  });
+});

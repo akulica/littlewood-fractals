@@ -31,6 +31,41 @@ const CAL_DEGREE = 20; // calibration workload: 2^18 Littlewood polynomials of d
 const CAL_POLYS = 1 << 18;
 const CAL_LW: Complex[] = [{ re: 1, im: 0 }, { re: -1, im: 0 }];
 
+/**
+ * Pipeline cache per GPUDevice. Compiling the pipelines costs ~120 ms per Engine on the PC (RX 9060 XT) and Dawn
+ * does not dedupe them, so every export used to pay it again. Modules are keyed by label + WGSL source, compute
+ * pipelines by module object + entry point, render pipelines by an explicit key: identical inputs give the same
+ * compiled pipeline, so output is bit-identical. Held in WeakMaps: a lost/destroyed device drops its entries.
+ */
+const moduleCache = new WeakMap<GPUDevice, Map<string, GPUShaderModule>>();
+const computeCache = new WeakMap<GPUShaderModule, Map<string, GPUComputePipeline>>();
+const renderCache = new WeakMap<GPUDevice, Map<string, GPURenderPipeline>>();
+
+function cachedModule(device: GPUDevice, label: string, code: string): GPUShaderModule {
+  let m = moduleCache.get(device);
+  if (!m) moduleCache.set(device, (m = new Map()));
+  const key = `${label}:${code}`;
+  let mod = m.get(key);
+  if (!mod) m.set(key, (mod = device.createShaderModule({ label, code })));
+  return mod;
+}
+
+function cachedCompute(device: GPUDevice, module: GPUShaderModule, entryPoint: string): GPUComputePipeline {
+  let m = computeCache.get(module);
+  if (!m) computeCache.set(module, (m = new Map()));
+  let pipe = m.get(entryPoint);
+  if (!pipe) m.set(entryPoint, (pipe = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint } })));
+  return pipe;
+}
+
+function cachedPipeline(device: GPUDevice, key: string, make: () => GPURenderPipeline): GPURenderPipeline {
+  let m = renderCache.get(device);
+  if (!m) renderCache.set(device, (m = new Map()));
+  let pipe = m.get(key);
+  if (!pipe) m.set(key, (pipe = make()));
+  return pipe;
+}
+
 /** golden: sample m is polynomial m*G mod N (G ~ 0.618 N), so every prefix looks like the full picture.
  * lexicographic: m itself (tests/debugging). Both cover every polynomial exactly once. */
 export type Ordering = 'golden' | 'lexicographic';
@@ -109,7 +144,10 @@ export class Engine {
   skipOverflowGuard = false;
   private readonly splatPipe: GPUComputePipeline;
   private readonly coopPipe: GPUComputePipeline;
-  private readonly debugPipe: GPUComputePipeline;
+  // debugRoots is test-only: compiled on first use (~30 ms on the PC), from the per-device cache.
+  private get debugPipe(): GPUComputePipeline {
+    return cachedCompute(this.device, this.rootsModule, 'debugRoots');
+  }
   private readonly rootsModule: GPUShaderModule;
   private readonly coopModule: GPUShaderModule;
   // Built on first use: exports and the live view never need them.
@@ -138,21 +176,22 @@ export class Engine {
 
   constructor(device: GPUDevice, format: GPUTextureFormat) {
     this.device = device;
-    const roots = device.createShaderModule({ label: 'roots', code: rootsSrc });
+    const roots = cachedModule(device, 'roots', rootsSrc);
     this.rootsModule = roots;
-    const display = device.createShaderModule({ label: 'display', code: displaySrc });
-    this.splatPipe = device.createComputePipeline({ layout: 'auto', compute: { module: roots, entryPoint: 'splat' } });
-    this.debugPipe = device.createComputePipeline({ layout: 'auto', compute: { module: roots, entryPoint: 'debugRoots' } });
-    const coop = device.createShaderModule({ label: 'coop', code: coopSrc });
+    const display = cachedModule(device, 'display', displaySrc);
+    this.splatPipe = cachedCompute(device, roots, 'splat');
+    const coop = cachedModule(device, 'coop', coopSrc);
     this.coopModule = coop;
-    this.coopPipe = device.createComputePipeline({ layout: 'auto', compute: { module: coop, entryPoint: 'splatCoop' } });
-    this.reducePipe = device.createComputePipeline({ layout: 'auto', compute: { module: display, entryPoint: 'reduceMax' } });
-    this.renderPipe = device.createRenderPipeline({
-      layout: 'auto',
-      vertex: { module: display, entryPoint: 'vs' },
-      fragment: { module: display, entryPoint: 'fs', targets: [{ format }] },
-      primitive: { topology: 'triangle-list' },
-    });
+    this.coopPipe = cachedCompute(device, coop, 'splatCoop');
+    this.reducePipe = cachedCompute(device, display, 'reduceMax');
+    this.renderPipe = cachedPipeline(device, `render:display:${format}`, () =>
+      device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module: display, entryPoint: 'vs' },
+        fragment: { module: display, entryPoint: 'fs', targets: [{ format }] },
+        primitive: { topology: 'triangle-list' },
+      }),
+    );
     const U = GPUBufferUsage;
     this.paramsBuf = device.createBuffer({ size: PARAMS_BYTES, usage: U.UNIFORM | U.COPY_DST });
     // Coefficients of up to MAX_BATCH_FRAMES frames, then two vec2f per frame for splatFrames' per-frame views.
@@ -258,10 +297,7 @@ export class Engine {
     const views = p.views ?? p.frames.map(() => p.view);
     this.device.queue.writeBuffer(this.coeffBuf, FRAME_VIEWS * 8, new Float32Array(views.flatMap((v) => [v.cx, v.cy, v.pxPerUnit, 0])));
     const used = framesKernel(this.kernel);
-    const pipe = (this.framesPipes[used] ??= this.device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: used === 'splatFramesCoop' ? this.coopModule : this.rootsModule, entryPoint: used },
-    }));
+    const pipe = (this.framesPipes[used] ??= cachedCompute(this.device, used === 'splatFramesCoop' ? this.coopModule : this.rootsModule, used));
     this.frameCount = n;
     this.framesTarget = target;
     this.framesUsed = used;
