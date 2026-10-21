@@ -78,7 +78,7 @@ Kernel variants (`tests/gpu/variants.perf.ts`, ratio of cooperative time to per-
 | RX 9060 XT (RDNA 4) | 0.69–0.71 | 0.60–0.66 |
 | Arc 140T | 1.19–1.33 | 1.15–1.30 |
 
-The throughput table above uses the per-polynomial kernel. With auto-selection the PC uses the cooperative kernel, which brings degree 20 down to **50 ms** and degree 24 down to **0.71 s** (`calibrate: coop … coop/perPoly = 0.72` in `bench-pc.log`).
+The throughput table above uses the per-polynomial kernel. With auto-selection the PC uses the cooperative kernel, which brings degree 20 down to **50 ms** and degree 24 down to **0.71 s** (`npm run bench` on the PC reports `coop/perPoly = 0.72`).
 
 Since the winner depends on the GPU, both kernels ship. At startup `Engine.calibrate()` runs 2¹⁸ degree-20 Littlewood polynomials on each kernel: interleaved, best of 3 after a warm-up, about 0.1–0.5 s in total. It switches to the cooperative kernel only if that wins by more than 10 %, so timing noise can't flip the choice on GPUs where the two are close.
 

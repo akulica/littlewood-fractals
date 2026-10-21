@@ -48,3 +48,7 @@ The app saves work in two ways:
 ## Prior art
 
 [Greg Egan](https://www.gregegan.net/SCIENCE/Littlewood/Littlewood.html), [2swap](https://github.com/2swap/LittlewoodFractal) and Simon Tatham have made Littlewood visualizers before. Theirs work on the CPU or per pixel; this one solves for the roots on the GPU.
+
+## License
+
+[MIT](LICENSE)
